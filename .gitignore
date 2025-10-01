@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+yolov10-optimization.ipynb
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Log and data files
+logs/
+*.log
+saved_images/
+runs/
+
+# Models
+models/
+*.pt
+*.pth
+*.onnx
+*.xml
+*.bin
+
+# Temp directories
+download-ripgrepzDRkg3/
+
+# Documentation
+*.docx

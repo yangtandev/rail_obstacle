@@ -9,7 +9,7 @@ import glob
 import time
 from frame4 import process_frame
 import multiprocessing
-from multiprocessing import Queue, Process
+from multiprocessing import Queue, Process, Event
 import base64
 import requests
 from zoneinfo import ZoneInfo
@@ -124,9 +124,13 @@ def get_location_id_from_str(cam_id_str):
         return 10037 + (cam_num - 112)
 
 def process_detection_task(args):
+    task_start_time = time.time()
     frame, cam_id_str, danger_zone, model, lock, last_alert_times = args
     
-    results = model(source=frame, iou=0.5, conf=0.35, verbose=False)[0]
+    # Resize frame before inference
+    frame = cv2.resize(frame, (1280, 720))
+    
+    results = model(source=frame, iou=0.5, conf=0.5, verbose=False)[0]
     annotated_frame = results.plot()
 
     bboxes = []
@@ -184,53 +188,118 @@ def process_detection_task(args):
                 print(f"Error processing saved image for API: {e}")
 
     final_frame = draw_transparent_polygon(annotated_frame, danger_zone.exterior.coords)
+    
+    task_end_time = time.time()
+    processing_time = (task_end_time - task_start_time) * 1000  # Convert to milliseconds
+    log.info(f"CAM {cam_id_str}: Detection task took {processing_time:.2f} ms")
+    
     return cam_id_str, final_frame
 
-def main_loop(queues, danger_zones, model, active_camera_ids):
+def main_loop(main_processes, main_stop_events, queues, danger_zones, model, active_camera_ids, rtsp_links, Hailey):
     num_workers = os.cpu_count()
     log.info(f"Initializing detection pool with {num_workers} workers.")
 
     alert_lock = threading.Lock()
     last_alert_times = {}
+    
+    is_paused = None # Use None to force initial state message
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_cam = {}
         
         while True:
-            for idx, cam_id_str in enumerate(active_camera_ids):
-                if not queues[idx].empty():
-                    frame = queues[idx].get()
-                    if frame is not None:
-                        args = (frame, cam_id_str, danger_zones[idx], model, alert_lock, last_alert_times)
-                        future = executor.submit(process_detection_task, args)
-                        future_to_cam[future] = cam_id_str
+            tz = ZoneInfo('Asia/Taipei')
+            now = datetime.datetime.now(tz)
 
-            try:
-                done_futures = concurrent.futures.as_completed(future_to_cam, timeout=0.01)
-                for future in done_futures:
-                    cam_id_str_future = future_to_cam.pop(future)
-                    try:
-                        cam_id_result, processed_frame = future.result()
-                        cv2.imshow(f'Camera {cam_id_result}', processed_frame)
-                    except Exception as exc:
-                        log.error(f'Camera {cam_id_str_future} generated an exception: {exc}')
-            except concurrent.futures.TimeoutError:
-                pass
+            if 8 <= now.hour < 18:
+                # --- RUNNING STATE ---
+                if is_paused is not False:
+                    log.info("Operating hours (08:00-18:00) started. Resuming detection.")
+                    is_paused = False
+                    # If processes are not running, start them
+                    if not main_processes:
+                        log.info("Camera processes are not running. Starting them now...")
+                        main_stop_events.extend([Event() for _ in range(len(rtsp_links))])
+                        for i, rtsp_link in enumerate(rtsp_links):
+                            process_frame_instance = Process(target=process_frame, daemon=True, args=(rtsp_link, queues[i], active_camera_ids[i], Hailey, main_stop_events[i]))
+                            main_processes.append(process_frame_instance)
+                        for p in main_processes:
+                            p.start()
+                        log.info(f"{len(main_processes)} camera processes started.")
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    
+                for idx, cam_id_str in enumerate(active_camera_ids):
+                    if not queues[idx].empty():
+                        frame = queues[idx].get()
+                        if frame is not None:
+                            args = (frame, cam_id_str, danger_zones[idx], model, alert_lock, last_alert_times)
+                            future = executor.submit(process_detection_task, args)
+                            future_to_cam[future] = cam_id_str
+
+                try:
+                    done_futures = concurrent.futures.as_completed(future_to_cam, timeout=0.01)
+                    for future in done_futures:
+                        cam_id_str_future = future_to_cam.pop(future)
+                        try:
+                            cam_id_result, processed_frame = future.result()
+                            cv2.imshow(f'Camera {cam_id_result}', processed_frame)
+                        except Exception as exc:
+                            log.error(f'Camera {cam_id_str_future} generated an exception: {exc}')
+                except concurrent.futures.TimeoutError:
+                    pass
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            
+            else:
+                # --- PAUSED STATE ---
+                if is_paused is not True:
+                    log.info(f"Operating hours ended. Pausing detection until 08:00. Current time: {now.strftime('%H:%M:%S')}")
+                    cv2.destroyAllWindows()
+                    is_paused = True
+                
+                # Stop camera processes if they are running
+                if main_processes:
+                    log.info("Stopping camera processes...")
+                    for event in main_stop_events:
+                        event.set()
+                    for p in main_processes:
+                        p.join(timeout=5) # Wait for processes to terminate
+                    main_processes.clear()
+                    main_stop_events.clear()
+                    log.info("All camera processes have been stopped.")
+
+                # Clear any pending futures and queues
+                for future in future_to_cam:
+                    future.cancel()
+                future_to_cam.clear()
+                
+                for q in queues:
+                    while not q.empty():
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            pass
+                
+                time.sleep(30) # Sleep for 30 seconds before re-checking the time
+
+    # Cleanup on exit
+    if main_processes:
+        log.info("Exiting. Stopping all camera processes...")
+        for event in main_stop_events:
+            event.set()
+        for p in main_processes:
+            p.join()
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
+#    active_camera_ids = ["1921683111"]
     active_camera_ids = [
-        "1921683111", "1921683112", "1921683113", "1921683114", "1921683115",
-        "1921683116", "1921683117", "1921683118", "1921683119", "1921683120"
+        "1921683111", "1921683113", "1921683115", "1921683118", "1921683120"
     ]
     # Comment out cameras you want to disable
     # active_camera_ids = ["1921683111", "1921683120"]
 
-    rtsp_links = [f"http://111.70.11.75:9080/image/{cam_id}%2Ejpg" for cam_id in active_camera_ids]
+    rtsp_links = [f"http://192.168.3.201:9080/image/{cam_id}%2Ejpg" for cam_id in active_camera_ids]
     area_files = [f'./mask/{cam_id}.txt' for cam_id in active_camera_ids]
     
     danger_zones = read_areas(area_files)
@@ -240,13 +309,29 @@ if __name__ == '__main__':
     Hailey.coordinate = None
 
     queues = [Queue() for _ in range(len(rtsp_links))]
-
     processes = []
+    stop_events = []
+
+    # Initial start of processes
+    log.info("Starting initial camera processes...")
+    stop_events.extend([Event() for _ in range(len(rtsp_links))])
     for i, rtsp_link in enumerate(rtsp_links):
-        process_frame_instance = Process(target=process_frame, daemon=True, args=(rtsp_link, queues[i], active_camera_ids[i], Hailey))
+        process_frame_instance = Process(target=process_frame, daemon=True, args=(rtsp_link, queues[i], active_camera_ids[i], Hailey, stop_events[i]))
         processes.append(process_frame_instance)
 
     for p in processes:
         p.start()
+    log.info(f"{len(processes)} camera processes started.")
 
-    main_loop(queues, danger_zones, model, active_camera_ids)
+    try:
+        main_loop(processes, stop_events, queues, danger_zones, model, active_camera_ids, rtsp_links, Hailey)
+    except KeyboardInterrupt:
+        log.info("Keyboard interrupt received. Shutting down.")
+    finally:
+        # Final cleanup
+        if processes:
+            log.info("Ensuring all processes are stopped before exiting.")
+            for event in stop_events:
+                event.set()
+            for p in processes:
+                p.join(timeout=5)

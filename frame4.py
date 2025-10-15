@@ -13,12 +13,11 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 
 
-def process_frame(rtsp, queue_frame, Process_frame_name, Hailey, queue_alert=None):
+def process_frame(rtsp, queue_frame, Process_frame_name, Hailey, stop_event, queue_alert=None):
 
     cam = Camera(rtsp)
-    cam.connect()
     
-    while True:
+    while not stop_event.is_set():
         frame = cam.get_frame()
 
         if type(frame) == type(None):

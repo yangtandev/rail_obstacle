@@ -8,6 +8,28 @@ import time
 import numpy as np
 import os
 import requests
+import sys
+import io
+import contextlib
+
+@contextlib.contextmanager
+def stderr_redirected(to=os.devnull):
+    """
+    Redirect stderr to a file-like object.
+    """
+    fd = sys.stderr.fileno()
+
+    def _redirect_stderr(to_fd):
+        sys.stderr.close()  # close sys.stderr
+        os.dup2(to_fd, fd)  # redirect new sys.stderr to to_fd
+
+    with os.fdopen(os.dup(fd), 'w') as old_stderr:
+        with open(to, 'w') as file:
+            _redirect_stderr(file.fileno())
+        try:
+            yield
+        finally:
+            _redirect_stderr(old_stderr.fileno())
 
 class Camera:
     def __init__(self, rtsp):
@@ -34,24 +56,30 @@ class Camera:
             if not data:
                 print(f"Error: Received empty content from {self.rtsp}")
                 return None
-
-            # Check 3: JPEG file integrity (SOI and EOI markers)
-            if not (data.startswith(b'\xff\xd8') and data.endswith(b'\xff\xd9')):
-                print(f"Error: Incomplete JPEG file received from {self.rtsp}")
-                return None
             
-            # Decode the verified, complete image data
-            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            # --- New Check: Corrupt JPEG data (replaces old Check 3 and enhances Check 4) ---
+            temp_stderr_file = "temp_stderr_camera.txt"
+            frame = None
+            with stderr_redirected(to=temp_stderr_file):
+                frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            
+            stderr_output = ""
+            if os.path.exists(temp_stderr_file):
+                with open(temp_stderr_file, 'r') as f:
+                    stderr_output = f.read()
+                os.remove(temp_stderr_file) # Clean up the temporary file
+
+            if "Corrupt JPEG data" in stderr_output:
+                print(f"Frame discarded: Corrupt JPEG data detected from {self.rtsp}.")
+                return None
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching frame from {self.rtsp}: {e}")
             return None
 
-        # --- Method 2: Reactive Quality Filtering ---
-
-        # Check 4: Decoding failure or empty image
+        # Check 4 (modified): Decoding failure or empty image (if not already caught by corruption check)
         if frame is None or frame.size == 0:
-            print("Error: Failed to decode image data.")
+            print("Error: Failed to decode image data (or empty after decoding).")
             return None
 
         # Check 5: Discard non-BGR images (e.g., grayscale)

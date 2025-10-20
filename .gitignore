@@ -23,13 +23,6 @@ logs/
 saved_images/
 runs/
 
-# Models
-models/
-*.pt
-*.pth
-*.onnx
-*.xml
-*.bin
 
 # Temp directories
 download-ripgrepzDRkg3/

@@ -7,46 +7,38 @@ import sys
 import os
 import glob
 import time
-from frame4 import process_frame
 import multiprocessing
 from multiprocessing import Queue, Process, Event
-
-import base64
 import requests
 from zoneinfo import ZoneInfo
 from shapely.geometry import Polygon, box
 import datetime
-import concurrent.futures
-import threading
 import contextlib
-import queue # New import for threading.Queue
+import io
+import threading
+
+from camera import Camera
 
 api = "https://jenyi-xg.api.ginibio.com/api/v1"
-log.basicConfig(format='[ %(levelname)s ] %(message)s', level=log.DEBUG, stream=sys.stdout)
+log.basicConfig(format='[%(levelname)s] %(message)s', level=log.INFO, stream=sys.stdout)
 models_dir = Path('./models')
 model_name = "rail_obstacle"
 int8_model_det_path = models_dir / 'int8' / f'{model_name}_openvino_model'
 
-# Thread-local storage to hold a model instance for each thread
-thread_local_data = threading.local()
-
 @contextlib.contextmanager
-def stderr_redirected(lock, to=os.devnull):
-    lock.acquire()
-    fd = sys.stderr.fileno()
-
-    def _redirect_stderr(to_fd):
-        sys.stderr.close()
-        os.dup2(to_fd, fd)
-
-    with os.fdopen(os.dup(fd), 'w') as old_stderr:
-        with open(to, 'w') as file:
-            _redirect_stderr(file.fileno())
-        try:
-            yield
-        finally:
-            _redirect_stderr(old_stderr.fileno())
-            lock.release()
+def stderr_redirected_to_file(filepath):
+    """Redirects stderr to a given file path."""
+    original_stderr_fd = sys.stderr.fileno()
+    saved_stderr_fd = os.dup(original_stderr_fd)
+    
+    with open(filepath, 'w') as f:
+        os.dup2(f.fileno(), original_stderr_fd)
+    
+    try:
+        yield
+    finally:
+        os.dup2(saved_stderr_fd, original_stderr_fd)
+        os.close(saved_stderr_fd)
 
 def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     if not os.path.exists(directory):
@@ -112,10 +104,8 @@ def draw_transparent_polygon(image, points, color=(0, 0, 255), opacity=0.3):
     output = image.copy()
     if not points:
         return image
-    # Ensure points is a list of tuples/lists for fillPoly
     if hasattr(points, 'coords'):
         points = list(points.coords)
-        
     if points:
         cv2.fillPoly(overlay, [np.array(points, dtype=np.int32)], color)
         cv2.addWeighted(overlay, opacity, output, 1 - opacity, 0, output)
@@ -127,10 +117,10 @@ def alert_api(image, api, location):
     now = datetime.datetime.now(ZoneInfo('Asia/Taipei'))
     payload = {"image": image, "location": location, "timestamp": str(now), "status": 'not_success'}
     try:
-        response = requests.post(url, json=payload)
-        print(f"API Status Code: {response.status_code}")
+        response = requests.post(url, json=payload, timeout=10)
+        log.info(f"API Status Code: {response.status_code}")
     except Exception as e:
-        print(f"Error during API call: {e}")
+        log.error(f"Error during API call: {e}")
 
 def get_location_id_from_str(cam_id_str):
     cam_num = int(cam_id_str[-3:])
@@ -139,299 +129,152 @@ def get_location_id_from_str(cam_id_str):
     else:
         return 10037 + (cam_num - 112)
 
-
-
-stderr_lock = threading.Lock()
-
-def handle_alert_and_save(cam_id_str, alert_lock, last_alert_times, camera_queue, model_path, danger_zones_all, active_camera_ids):
-    log.info(f"CAM {cam_id_str}: Intrusion detected. Starting alert/save thread.")
+def handle_alert_in_background(annotated_frame, cam_id):
+    """
+    This function runs in a background thread to handle all blocking alert operations.
+    """
+    log.info(f"[{cam_id}] Background alert thread started.")
     
+    # 1. Trigger physical alarm
+    cam_num = int(cam_id[-3:])
+    alert_ip = None
+    if cam_num in range(111, 116):
+        alert_ip = '192.168.3.181'
+    elif cam_num in range(116, 121):
+        alert_ip = '192.168.3.182'
+    
+    if alert_ip:
+        try:
+            requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=1', timeout=2)
+            time.sleep(5)
+            requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=0', timeout=2)
+            log.info(f"[{cam_id}] Alarm cycle completed.")
+        except requests.exceptions.RequestException as e:
+            log.error(f"[{cam_id}] Failed to trigger alarm: {e}")
+
+    # 2. Save image
+    current_date = datetime.datetime.now().strftime("%Y%m%d")
+    directory = os.path.join('./saved_images', current_date)
+    file_path = save_image_with_limit(annotated_frame, directory, 'detected', cam_id)
+    
+    # 3. Send API alert
+    if file_path and os.path.exists(file_path):
+        try:
+            saved_image = cv2.imread(file_path)
+            if saved_image is not None:
+                base64_image = image2base64(saved_image)
+                location_id = get_location_id_from_str(cam_id)
+                alert_api(base64_image, api, location_id)
+        except Exception as e:
+            log.error(f"[{cam_id}] Error processing saved image for API: {e}")
+
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event):
+    log.info(f"[{cam_id}] Process started.")
+    cam = Camera(rtsp_link)
+    model = YOLOv10(int8_model_det_path, task='detect')
+    
+    # State variables for cooldown
+    last_alert_time = 0
     cooldown_period = 5
-    current_time = time.time()
     
-    with alert_lock:
-        last_alert_time = last_alert_times.get(cam_id_str, 0)
-        if (current_time - last_alert_time) < cooldown_period:
-            log.info(f"CAM {cam_id_str}: Alert cooldown active. Skipping this alert.")
-            return
-        last_alert_times[cam_id_str] = current_time
+    temp_stderr_file = f"temp_stderr_{os.getpid()}.txt"
 
-    latest_data = None
-    while not camera_queue.empty():
-        try:
-            latest_data = camera_queue.get_nowait()
-        except Exception:
-            break 
-    
-    if latest_data is None:
-        log.warning(f"CAM {cam_id_str}: No latest frame available after cooldown. Skipping alert.")
-        return
-
-    if not hasattr(thread_local_data, 'model'):
-        log.info(f"Initializing model for alert thread {threading.get_ident()}...")
-        try:
-            thread_local_data.model = YOLOv10(model_path, task='detect')
-        except Exception as e:
-            log.error(f"Failed to load model in alert thread {threading.get_ident()}: {e}")
-            return
-
-    frame = cv2.imdecode(np.frombuffer(latest_data, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        log.warning(f"CAM {cam_id_str}: Failed to decode latest frame for alert. Skipping.")
-        return
-    
-    frame = cv2.resize(frame, (1280, 720))
-    
-    results = thread_local_data.model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
-    annotated_frame = results.plot()
-
-    bboxes = []
-    train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
-    for result in results.boxes:
-        bbox = result.xyxy[0]
-        cls = int(result.cls[0])
-        if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
-            continue
-        else:
-            bboxes.append(bbox)
-
-    danger_zone = None
-    try:
-        cam_index = active_camera_ids.index(cam_id_str)
-        danger_zone = danger_zones_all[cam_index]
-    except (ValueError, IndexError):
-        log.error(f"CAM {cam_id_str}: Danger zone not found for alert thread. Skipping.")
-        return
-
-    if not (bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes)):
-        log.info(f"CAM {cam_id_str}: No intrusion in latest frame after cooldown. Skipping alert.")
-        return 
-
-    is_corrupt = False
-    temp_stderr_file = f"temp_stderr_{threading.get_ident()}.txt"
-    try:
-        with stderr_redirected(stderr_lock, to=temp_stderr_file):
-            _ = cv2.imdecode(np.frombuffer(latest_data, np.uint8), cv2.IMREAD_COLOR)
-        
-        stderr_output = ""
-        if os.path.exists(temp_stderr_file):
-            with open(temp_stderr_file, 'r') as f:
-                stderr_output = f.read()
-            os.remove(temp_stderr_file)
-
-        if "Corrupt JPEG data" in stderr_output:
-            is_corrupt = True
-    except Exception as e:
-        log.error(f"CAM {cam_id_str}: Exception during corruption check in alert thread: {e}")
-        is_corrupt = True
-
-    if is_corrupt:
-        log.warning(f"CAM {cam_id_str}: Alert thread: Intrusion detected, but alert suppressed due to corrupt frame.")
-    else:
-        cam_num = int(cam_id_str[-3:])
-        if cam_num in range(111, 116):
-            alert_ip = '192.168.3.181'
-        elif cam_num in range(116, 121):
-            alert_ip = '192.168.3.182'
-        else:
-            alert_ip = None
-        
-        if alert_ip:
-            try:
-                response_on = requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=1', timeout=2)
-                if response_on.status_code == 200:
-                    print(f"CAM {cam_id_str}: 警報器已啟動")
-                    time.sleep(5)
-                    response_off = requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=0', timeout=2)
-                    if response_off.status_code == 200:
-                        print(f"CAM {cam_id_str}: 警報器已關閉")
-            except requests.exceptions.RequestException as e:
-                print(f"CAM {cam_id_str}: 未能輸出警報: {e}")
-
-        current_date = datetime.datetime.now().strftime("%Y%m%d")
-        directory = os.path.join('./saved_images', current_date)
-        file_path = save_image_with_limit(annotated_frame, directory, 'detected', cam_id_str)
-        
-        if file_path and os.path.exists(file_path):
-            try:
-                image_data = np.fromfile(file_path, dtype=np.uint8)
-                save_frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-                if save_frame is not None:
-                    base64_image = image2base64(save_frame)
-                    location_id = get_location_id_from_str(cam_id_str)
-                    alert_api(base64_image, api, location_id)
-            except Exception as e:
-                print(f"Error processing saved image for API: {e}")
-
-def process_detection_task(args):
-    t0 = time.time()
-    data, cam_id_str, danger_zone, alert_lock, last_alert_times, slow_path_executor, camera_queue, model_path, danger_zones_all, active_camera_ids = args
-
-    if not hasattr(thread_local_data, 'model'):
-        log.info(f"Initializing model for thread {threading.get_ident()}...")
-        try:
-            thread_local_data.model = YOLOv10(model_path, task='detect')
-        except Exception as e:
-            log.error(f"Failed to load model in thread {threading.get_ident()}: {e}", exc_info=True)
-            return cam_id_str, np.zeros((720, 1280, 3), dtype=np.uint8)
-    
-    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-    
-    if frame is None:
-        log.warning(f"CAM {cam_id_str}: Failed to decode frame, skipping task.")
-        return cam_id_str, np.zeros((720, 1280, 3), dtype=np.uint8)
-
-    frame = cv2.resize(frame, (1280, 720))
-    t_pre = time.time()
-    
-    results = thread_local_data.model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
-    t_post = time.time()
-    log.info(f"CAM {cam_id_str} [TIMING]: Model inference took {(t_post - t_pre) * 1000:.2f} ms")
-
-    annotated_frame = results.plot()
-    
-    bboxes = []
-    train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
-    for result in results.boxes:
-        bbox = result.xyxy[0]
-        cls = int(result.cls[0])
-        if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
-            continue
-        else:
-            bboxes.append(bbox)
-
-    if bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes):
-        slow_path_executor.submit(
-            handle_alert_and_save,
-            cam_id_str, alert_lock, last_alert_times, camera_queue, model_path, danger_zones_all, active_camera_ids
-        )
-
-    final_frame = draw_transparent_polygon(annotated_frame, danger_zone.exterior)
-    
-    return cam_id_str, final_frame
-
-def display_worker(display_queue, stop_event):
-    log.info("Display thread started.")
-    windows = {}
     while not stop_event.is_set():
         try:
-            latest_frames = {}
-            while not display_queue.empty():
-                cam_id, frame = display_queue.get_nowait()
-                latest_frames[cam_id] = frame
+            tz = ZoneInfo('Asia/Taipei')
+            now = datetime.datetime.now(tz)
+            if not (8 <= now.hour < 18):
+                time.sleep(30)
+                continue
 
-            for cam_id, frame in latest_frames.items():
-                window_name = f'Camera {cam_id}'
-                if window_name not in windows:
-                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-                    cv2.resizeWindow(window_name, 1280, 720)
-                    windows[window_name] = True
-                
-                cv2.imshow(window_name, frame)
-        except queue.Empty:
-            pass
+            t_start = time.time()
+            data = cam.get_data()
+            if data is None:
+                time.sleep(1)
+                continue
 
-        key = cv2.waitKey(1) & 0xFF
-        if key in [ord('q'), ord('Q')]:
-            log.info("Quit signal received in display thread. Stopping all processes.")
-            stop_event.set()
-            break
-    
-    cv2.destroyAllWindows()
-    log.info("Display thread finished.")
+            # Decode and validate frame
+            is_corrupt = False
+            frame = None
+            try:
+                with stderr_redirected_to_file(temp_stderr_file):
+                    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                stderr_output = ""
+                if os.path.exists(temp_stderr_file):
+                    with open(temp_stderr_file, 'r') as f:
+                        stderr_output = f.read()
+                if "Corrupt JPEG data" in stderr_output:
+                    is_corrupt = True
+                    log.warning(f"[{cam_id}] Frame discarded: Corrupt JPEG data detected.")
+            finally:
+                if os.path.exists(temp_stderr_file):
+                    os.remove(temp_stderr_file)
 
-def main_loop(main_processes, main_stop_events, queues, danger_zones, active_camera_ids, rtsp_links, Hailey, display_queue, display_stop_event):
-    num_workers = os.cpu_count()
-    log.info(f"Initializing detection pool with {num_workers} workers.")
+            if frame is None or is_corrupt:
+                continue
 
-    alert_lock = threading.Lock()
-    last_alert_times = {}
-    is_paused = None
+            frame = cv2.resize(frame, (1280, 720))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as fast_path_executor:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_camera_ids)) as slow_path_executor:
-            future_to_cam = {}
-            
-            while not display_stop_event.is_set():
-                tz = ZoneInfo('Asia/Taipei')
-                now = datetime.datetime.now(tz)
+            # Always run detection
+            t_pre_infer = time.time()
+            results = model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
+            t_post_infer = time.time()
+            log.info(f"[{cam_id}] Inference time: {(t_post_infer - t_pre_infer) * 1000:.2f} ms")
 
-                if 8 <= now.hour < 18:
-                    if is_paused in [True, None]:
-                        log.info("Operating hours (08:00-18:00) started. Resuming detection.")
-                        is_paused = False
-                        if not main_processes:
-                            log.info("Camera processes are not running. Starting them now...")
-                            main_stop_events.clear()
-                            main_stop_events.extend([Event() for _ in range(len(rtsp_links))])
-                            for i, rtsp_link in enumerate(rtsp_links):
-                                p = Process(target=process_frame, daemon=True, args=(rtsp_link, queues[i], active_camera_ids[i], Hailey, main_stop_events[i]))
-                                main_processes.append(p)
-                                p.start()
-                            log.info(f"{len(main_processes)} camera processes started.")
-
-                    # Process completed futures to free up camera slots
-                    for future in list(future_to_cam):
-                        if future.done():
-                            cam_id_str_future = future_to_cam.pop(future)
-                            try:
-                                cam_id_result, processed_frame = future.result()
-                                if processed_frame is not None:
-                                    try:
-                                        display_queue.put_nowait((cam_id_result, processed_frame))
-                                    except queue.Full:
-                                        pass
-                            except Exception as exc:
-                                log.error(f'Camera {cam_id_str_future} generated an exception: {exc}', exc_info=True)
-
-                    # Submit new tasks for cameras that are not currently being processed
-                    for idx, cam_id_str in enumerate(active_camera_ids):
-                        if cam_id_str in future_to_cam.values():
-                            continue  # Skip if a task for this camera is already in the pipeline
-
-                        latest_data = None
-                        while not queues[idx].empty():
-                            try:
-                                latest_data = queues[idx].get_nowait()
-                            except queue.Empty:
-                                break
-                        
-                        if latest_data is not None:
-                            data = latest_data
-                            args = (data, cam_id_str, danger_zones[idx], alert_lock, last_alert_times, slow_path_executor, queues[idx], int8_model_det_path, danger_zones, active_camera_ids)
-                            future = fast_path_executor.submit(process_detection_task, args)
-                            future_to_cam[future] = cam_id_str
-
+            # Check for intrusion
+            bboxes = []
+            train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
+            for result in results.boxes:
+                bbox = result.xyxy[0]
+                cls = int(result.cls[0])
+                if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
+                    continue
                 else:
-                    if is_paused in [False, None]:
-                        log.info(f"Operating hours ended. Pausing detection until 08:00. Current time: {now.strftime('%H:%M:%S')}")
-                        is_paused = True
-                    
-                    if main_processes:
-                        log.info("Stopping camera processes...")
-                        for event in main_stop_events:
-                            event.set()
-                        for p in main_processes:
-                            p.join(timeout=5)
-                        main_processes.clear()
-                        log.info("All camera processes have been stopped.")
+                    bboxes.append(bbox)
+            is_intrusion = bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes)
 
-                    for future in future_to_cam:
-                        future.cancel()
-                    future_to_cam.clear()
-                    
-                    for q in queues:
-                        while not q.empty():
-                            try:
-                                q.get_nowait()
-                            except queue.Empty:
-                                pass
-                    
-                    time.sleep(30)
+            # Check cooldown status
+            current_time = time.time()
+            is_in_cooldown = (current_time - last_alert_time) <= cooldown_period
 
-                time.sleep(0.01) # Prevent busy-waiting
+            # --- Alerting Logic ---
+            if is_intrusion and not is_in_cooldown:
+                last_alert_time = current_time
+                annotated_frame_for_alert = results.plot()
+                
+                # Launch background thread for all blocking alert tasks
+                alert_thread = threading.Thread(
+                    target=handle_alert_in_background,
+                    args=(annotated_frame_for_alert, cam_id),
+                    daemon=True
+                )
+                alert_thread.start()
 
-if __name__ == '__main__':
+            # --- Display Logic ---
+            display_frame = None
+            if is_in_cooldown:
+                # During cooldown, show the clean live frame
+                display_frame = frame.copy()
+            else:
+                # After cooldown, show annotated frame if intrusion, else clean frame
+                if is_intrusion:
+                    display_frame = results.plot()
+                else:
+                    display_frame = frame.copy()
+            
+            final_display_frame = draw_transparent_polygon(display_frame, danger_zone.exterior)
+            
+            if not display_queue.full():
+                display_queue.put((cam_id, final_display_frame))
+            
+            loop_duration = time.time() - t_start
+            log.info(f"[{cam_id}] Total loop time: {loop_duration * 1000:.2f} ms")
+
+        except Exception as e:
+            log.error(f"[{cam_id}] Unhandled exception in worker process: {e}", exc_info=True)
+            time.sleep(5)
+
+def main():
     active_camera_ids = [
         "1921683111", "1921683113", "1921683115", "1921683118", "1921683120"
     ]
@@ -441,32 +284,59 @@ if __name__ == '__main__':
     
     danger_zones = read_areas(area_files)
 
-    manager = multiprocessing.Manager()
-    Hailey = manager.Namespace()
-    Hailey.coordinate = None
-
-    queues = [Queue() for _ in range(len(rtsp_links))]
-    display_queue = queue.Queue(maxsize=len(active_camera_ids) * 2)
-
-    main_stop_events = [Event() for _ in range(len(rtsp_links))]
-    display_stop_event = threading.Event()
-
-    display_thread = threading.Thread(target=display_worker, args=(display_queue, display_stop_event))
-    display_thread.start()
+    display_queue = Queue(maxsize=len(active_camera_ids) * 2)
+    stop_event = Event()
 
     processes = []
-    
+    for i, cam_id in enumerate(active_camera_ids):
+        process = Process(
+            target=camera_process_worker,
+            args=(rtsp_links[i], cam_id, danger_zones[i], display_queue, stop_event),
+            daemon=True
+        )
+        processes.append(process)
+        process.start()
+
+    log.info("All camera processes started. Starting display loop.")
+
+    latest_frames = {}
+    window_names = {cam_id: f'Camera {cam_id}' for cam_id in active_camera_ids}
+
     try:
-        main_loop(processes, main_stop_events, queues, danger_zones, active_camera_ids, rtsp_links, Hailey, display_queue, display_stop_event)
+        while not stop_event.is_set():
+            while not display_queue.empty():
+                try:
+                    cam_id, frame = display_queue.get_nowait()
+                    latest_frames[cam_id] = frame
+                except Exception:
+                    break
+
+            for cam_id, frame in latest_frames.items():
+                window_name = window_names[cam_id]
+                cv2.imshow(window_name, frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in [ord('q'), ord('Q')]:
+                log.info("Quit signal received. Shutting down.")
+                stop_event.set()
+                break
+            
+            time.sleep(0.01)
+
     except KeyboardInterrupt:
         log.info("Keyboard interrupt received. Shutting down.")
+        stop_event.set()
+
     finally:
-        log.info("Ensuring all processes and threads are stopped before exiting.")
-        display_stop_event.set()
-        for event in main_stop_events:
-            event.set()
-        for p in processes:
-            if p.is_alive():
-                p.join(timeout=5)
-        display_thread.join(timeout=5)
+        log.info("Cleaning up processes...")
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                log.warning(f"Process {process.pid} did not terminate gracefully. Terminating.")
+                process.terminate()
+        
+        cv2.destroyAllWindows()
         log.info("Shutdown complete.")
+
+if __name__ == '__main__':
+    main()

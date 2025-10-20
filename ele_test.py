@@ -16,7 +16,7 @@ folder_path = "/home/gini-facetest/rail_obstacle"
 #camera_ip = '192.168.1.104'
 camera_ip = '1921683120'
 pictures_path = f"{folder_path}/image/{camera_ip}.jpg" # 從攝影機擷取下來的圖片
-resolution = (1920,1080) # 修改圖片的size
+resolution = (1280,720) # 修改圖片的size
 mask_folder_path = f"{folder_path}/mask" # 圖片遮罩位置
 coordinate_txt_path = f"{mask_folder_path}/{camera_ip}.txt" # 遮罩座標點位置
 

@@ -218,7 +218,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
             # Check for blurry images
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-            if laplacian_var < 100:  # Threshold from handover notes
+            if laplacian_var < 200:  # Threshold from handover notes
                 log.warning(f"[{cam_id}] Frame discarded: Blurry image detected (Laplacian Var: {laplacian_var:.2f}).")
                 continue
             

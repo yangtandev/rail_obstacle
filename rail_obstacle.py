@@ -238,6 +238,15 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
             for result in results.boxes:
                 bbox = result.xyxy[0]
                 cls = int(result.cls[0])
+
+                # Filter out very large bounding boxes, likely the train itself
+                box_width = bbox[2] - bbox[0]
+                box_height = bbox[3] - bbox[1]
+                frame_height = frame.shape[0]
+                frame_width = frame.shape[1]
+                if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
+                    continue
+
                 if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
                     continue
                 else:

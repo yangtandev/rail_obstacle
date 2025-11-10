@@ -19,3 +19,23 @@ A test script was used to analyze the Laplacian variance of problematic blurry i
 
 **File Modified:**
 `rail_obstacle.py`
+
+### Further Blur Detection Threshold Adjustment
+
+**Problem:**
+The system continued to miss some blurry images. Specifically, `detected_cam1921683111_2025-11-08_12-48-00.jpg` was identified as visually blurry but was not being discarded.
+
+**Cause:**
+Analysis showed that the Laplacian variance for this image was `682.91`. The existing threshold of `400` in `rail_obstacle.py` was not high enough to filter this image.
+
+**Solution:**
+As a short-term measure to immediately address the issue, the Laplacian variance threshold in `rail_obstacle.py` was increased from `400` to `700`.
+
+**Verification:**
+With the new threshold of `700`, the problematic image with a variance of `682.91` will now be correctly identified as blurry and discarded.
+
+**Note:**
+This is a temporary solution. For a more robust long-term fix, it is recommended to analyze a larger sample set of both blurry and sharp images to determine an optimal and more reliable threshold.
+
+**File Modified:**
+`rail_obstacle.py`

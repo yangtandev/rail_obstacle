@@ -7,38 +7,32 @@ import sys
 import os
 import glob
 import time
-import multiprocessing
 from multiprocessing import Queue, Process, Event
 import requests
 from zoneinfo import ZoneInfo
 from shapely.geometry import Polygon, box
 import datetime
-import contextlib
-import io
+import base64
 import threading
-
 from camera import Camera
 
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+
+# ================= 系統全域設定 =================
+ENABLE_RECORDING = True  # 控制是否啟用自動錄影 (True: 啟用, False: 停用)
+# ================================================
+
 api = "https://jenyi-xg.api.ginibio.com/api/v1"
-log.basicConfig(format='[%(levelname)s] %(message)s', level=log.INFO, stream=sys.stdout)
+log.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(message)s', 
+    datefmt='%Y-%m-%d %H:%M:%S', 
+    level=log.INFO, 
+    stream=sys.stdout
+)
 models_dir = Path('./models')
 model_name = "rail_obstacle"
 int8_model_det_path = models_dir / 'int8' / f'{model_name}_openvino_model'
-
-@contextlib.contextmanager
-def stderr_redirected_to_file(filepath):
-    """Redirects stderr to a given file path."""
-    original_stderr_fd = sys.stderr.fileno()
-    saved_stderr_fd = os.dup(original_stderr_fd)
-    
-    with open(filepath, 'w') as f:
-        os.dup2(f.fileno(), original_stderr_fd)
-    
-    try:
-        yield
-    finally:
-        os.dup2(saved_stderr_fd, original_stderr_fd)
-        os.close(saved_stderr_fd)
 
 def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     if not os.path.exists(directory):
@@ -168,155 +162,181 @@ def handle_alert_in_background(annotated_frame, cam_id):
         except Exception as e:
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
-def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event):
-    log.info(f"[{cam_id}] Process started.")
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording):
+    log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
     cam = Camera(rtsp_link)
+    
+    log.info(f"[{cam_id}] RTSP 連線完成. 準備載入模型...")
     model = YOLOv10(int8_model_det_path, task='detect')
     
-    # State variables for cooldown
+    log.info(f"[{cam_id}] 模型載入完成. 進入影像處理迴圈.")
+    
     last_alert_time = 0
     cooldown_period = 5
     
-    temp_stderr_file = f"temp_stderr_{os.getpid()}.txt"
+    no_frame_counter = 0
+    reconnect_threshold = 10 
 
-    while not stop_event.is_set():
-        try:
-            tz = ZoneInfo('Asia/Taipei')
-            now = datetime.datetime.now(tz)
-            if not (8 <= now.hour < 18):
-                time.sleep(30)
-                continue
+    # 錄影相關變數
+    video_writer = None
+    current_record_hour = None 
+    if enable_recording:
+        record_dir = "./records"
+        if not os.path.exists(record_dir):
+            os.makedirs(record_dir)
 
-            t_start = time.time()
-            data = cam.get_data()
-            if data is None:
-                time.sleep(1)
-                continue
-
-            # Decode and validate frame
-            is_corrupt = False
-            frame = None
+    try:
+        while not stop_event.is_set():
             try:
-                with stderr_redirected_to_file(temp_stderr_file):
-                    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-                stderr_output = ""
-                if os.path.exists(temp_stderr_file):
-                    with open(temp_stderr_file, 'r') as f:
-                        stderr_output = f.read()
-                if "Corrupt JPEG data" in stderr_output:
-                    is_corrupt = True
-                    log.warning(f"[{cam_id}] Frame discarded: Corrupt JPEG data detected.")
-            finally:
-                if os.path.exists(temp_stderr_file):
-                    os.remove(temp_stderr_file)
-
-            if frame is None or is_corrupt:
-                continue
-
-            # --- Start of additional validation checks ---
-
-            # Check for blurry images
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-            if laplacian_var < 700:  # Threshold from handover notes
-                log.warning(f"[{cam_id}] Frame discarded: Blurry image detected (Laplacian Var: {laplacian_var:.2f}).")
-                continue
-            
-            # --- End of additional validation checks ---
-
-            frame = cv2.resize(frame, (1280, 720))
-
-            # Always run detection
-            t_pre_infer = time.time()
-            results = model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
-            t_post_infer = time.time()
-            log.info(f"[{cam_id}] Inference time: {(t_post_infer - t_pre_infer) * 1000:.2f} ms")
-
-            # Check for intrusion
-            bboxes = []
-            train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
-            for result in results.boxes:
-                bbox = result.xyxy[0]
-                cls = int(result.cls[0])
-
-                # Filter out very large bounding boxes, likely the train itself
-                box_width = bbox[2] - bbox[0]
-                box_height = bbox[3] - bbox[1]
-                frame_height = frame.shape[0]
-                frame_width = frame.shape[1]
-                if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
-                    continue
-
-                if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
-                    continue
-                else:
-                    bboxes.append(bbox)
-            is_intrusion = bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes)
-
-            # Check cooldown status
-            current_time = time.time()
-            is_in_cooldown = (current_time - last_alert_time) <= cooldown_period
-
-            # --- Alerting Logic ---
-            if is_intrusion and not is_in_cooldown:
-                last_alert_time = current_time
-                annotated_frame_for_alert = results.plot()
+                tz = ZoneInfo('Asia/Taipei')
+                now = datetime.datetime.now(tz)
                 
-                # Launch background thread for all blocking alert tasks
-                alert_thread = threading.Thread(
-                    target=handle_alert_in_background,
-                    args=(annotated_frame_for_alert, cam_id),
-                    daemon=True
-                )
-                alert_thread.start()
+                # 下班時間安全收尾
+                if not (8 <= now.hour < 18):
+                    if video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
+                        current_record_hour = None
+                        log.info(f"[{cam_id}] ⏹️ 進入非辨識時段，自動停止錄影並封裝存檔。")
+                    time.sleep(30)
+                    continue
 
-            # --- Display Logic ---
-            display_frame = None
-            if is_in_cooldown:
-                # During cooldown, show the clean live frame
-                display_frame = frame.copy()
-            else:
-                # After cooldown, show annotated frame if intrusion, else clean frame
-                if is_intrusion:
-                    display_frame = results.plot()
-                else:
-                    display_frame = frame.copy()
-            
-            final_display_frame = draw_transparent_polygon(display_frame, danger_zone.exterior)
-            
-            if not display_queue.full():
-                display_queue.put((cam_id, final_display_frame))
-            
-            loop_duration = time.time() - t_start
-            log.info(f"[{cam_id}] Total loop time: {loop_duration * 1000:.2f} ms")
+                t_start = time.time()
+                
+                frame = cam.get_data()
+                
+                if frame is None:
+                    no_frame_counter += 1
+                    log.warning(f"[{cam_id}] 警告: 無法取得影像 ({no_frame_counter}/{reconnect_threshold})...")
+                    
+                    if no_frame_counter >= reconnect_threshold:
+                        log.error(f"[{cam_id}] 影像中斷過久，釋放資源並嘗試重新連線...")
+                        cam.release()
+                        time.sleep(2)
+                        cam = Camera(rtsp_link)
+                        no_frame_counter = 0
+                        
+                    time.sleep(1)
+                    continue
+                
+                no_frame_counter = 0
 
-        except Exception as e:
-            log.error(f"[{cam_id}] Unhandled exception in worker process: {e}", exc_info=True)
-            time.sleep(5)
+                frame = cv2.resize(frame, (1280, 720))
+
+                results = model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
+
+                bboxes = []
+                train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
+                for result in results.boxes:
+                    bbox = result.xyxy[0]
+                    cls = int(result.cls[0])
+
+                    box_width = bbox[2] - bbox[0]
+                    box_height = bbox[3] - bbox[1]
+                    frame_height = frame.shape[0]
+                    frame_width = frame.shape[1]
+                    if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
+                        continue
+
+                    if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
+                        continue
+                    else:
+                        bboxes.append(bbox)
+                is_intrusion = bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes)
+
+                current_time = time.time()
+                is_in_cooldown = (current_time - last_alert_time) <= cooldown_period
+
+                # Alerting Logic
+                if is_intrusion and not is_in_cooldown:
+                    last_alert_time = current_time
+                    annotated_frame_for_alert = results.plot()
+                    
+                    annotated_frame_for_alert = draw_transparent_polygon(annotated_frame_for_alert, danger_zone.exterior)
+                    
+                    alert_thread = threading.Thread(
+                        target=handle_alert_in_background,
+                        args=(annotated_frame_for_alert, cam_id),
+                        daemon=True
+                    )
+                    alert_thread.start()
+
+                # --- 修改後的 Display Logic：永遠顯示 YOLO 的辨識框 ---
+                display_frame = results.plot()
+                final_display_frame = draw_transparent_polygon(display_frame, danger_zone.exterior)
+                
+                if not display_queue.full():
+                    display_queue.put((cam_id, final_display_frame))
+                
+                # 自動換檔與寫入錄影
+                if enable_recording:
+                    current_hour = now.hour
+                    
+                    # 發現跨越到下一個小時了，先關閉目前的寫入器
+                    if video_writer is not None and current_record_hour != current_hour:
+                        video_writer.release()
+                        video_writer = None
+                        log.info(f"[{cam_id}] 🕛 跨小時換檔，前一段影片已自動存檔。")
+
+                    # 若沒有寫入器，就建一個新的
+                    if video_writer is None:
+                        timestamp = time.strftime('%Y%m%d_%H%M%S')
+                        record_path = os.path.join(record_dir, f"record_cam{cam_id}_{timestamp}.mp4")
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(record_path, fourcc, 15.0, (1920, 1080))
+                        current_record_hour = current_hour
+                        log.info(f"[{cam_id}] 🔴 開始錄製此小時區段影片: {record_path}")
+                    
+                    record_frame = cv2.resize(final_display_frame, (1920, 1080))
+                    video_writer.write(record_frame)
+
+            except Exception as e:
+                log.error(f"[{cam_id}] Unhandled exception in worker process: {e}", exc_info=True)
+                time.sleep(5)
+    finally:
+        if video_writer is not None:
+            video_writer.release()
+        cam.release()
 
 def main():
     active_camera_ids = [
-        "1921683111", "1921683113", "1921683115", "1921683118", "1921683120"
+        "1921683111", 
+        #"1921683113", 
+        #"1921683115", 
+        #"1921683118", 
+        "1921683120"
     ]
 
-    rtsp_links = [f"http://192.168.3.201:9080/image/{cam_id}%2Ejpg" for cam_id in active_camera_ids]
+    rtsp_links = [
+        "rtsp://192.168.3.201:9554/live/192.168.3.111",
+        #"rtsp://192.168.3.201:9554/live/192.168.3.113",
+        #"rtsp://192.168.3.201:9554/live/192.168.3.115",
+        #"rtsp://192.168.3.201:9554/live/192.168.3.118",
+        "rtsp://192.168.3.201:9554/live/192.168.3.120"
+    ]
     area_files = [f'./mask/{cam_id}.txt' for cam_id in active_camera_ids]
     
     danger_zones = read_areas(area_files)
 
     display_queue = Queue(maxsize=len(active_camera_ids) * 2)
     stop_event = Event()
+    
+    if ENABLE_RECORDING:
+        log.info("系統設定：自動錄影功能已啟用 (8~18點間將自動分段錄影)")
+    else:
+        log.info("系統設定：自動錄影功能已停用")
 
     processes = []
     for i, cam_id in enumerate(active_camera_ids):
         process = Process(
             target=camera_process_worker,
-            args=(rtsp_links[i], cam_id, danger_zones[i], display_queue, stop_event),
+            args=(rtsp_links[i], cam_id, danger_zones[i], display_queue, stop_event, ENABLE_RECORDING),
             daemon=True
         )
         processes.append(process)
         process.start()
-
+        time.sleep(2)
+        
     log.info("All camera processes started. Starting display loop.")
 
     latest_frames = {}
@@ -340,6 +360,17 @@ def main():
                 log.info("Quit signal received. Shutting down.")
                 stop_event.set()
                 break
+            
+            # 保留手動截圖快捷鍵 's'
+            elif key in [ord('s'), ord('S')]:
+                save_dir = "./exhibition_shots"
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                timestamp = time.strftime('%Y%m%d_%H%M%S')
+                for c_id, f in latest_frames.items():
+                    filename = os.path.join(save_dir, f"exhibition_cam{c_id}_{timestamp}.jpg")
+                    cv2.imwrite(filename, f)
+                log.info(f"📸 參展截圖已儲存至 {save_dir} 資料夾！")
             
             time.sleep(0.01)
 

@@ -14,6 +14,7 @@ from shapely.geometry import Polygon, box
 import datetime
 import base64
 import threading
+import json
 from camera import Camera
 
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
@@ -136,7 +137,7 @@ def get_location_id_from_str(cam_id_str):
     else:
         return 10037 + (cam_num - 112)
 
-def handle_alert_in_background(annotated_frame, cam_id):
+def handle_alert_in_background(annotated_frame, cam_id, raw_frame=None, debug_info=None):
     """
     This function runs in a background thread to handle all blocking alert operations.
     """
@@ -163,6 +164,23 @@ def handle_alert_in_background(annotated_frame, cam_id):
     current_date = datetime.datetime.now().strftime("%Y%m%d")
     directory = os.path.join('./saved_images', current_date)
     file_path = save_image_with_limit(annotated_frame, directory, 'detected', cam_id)
+
+    # 2.5 Save debug info
+    if file_path and raw_frame is not None and debug_info is not None:
+        try:
+            debug_dir = os.path.join(directory, 'debug')
+            if not os.path.exists(debug_dir):
+                os.makedirs(debug_dir)
+            
+            basename = os.path.splitext(os.path.basename(file_path))[0]
+            raw_image_path = os.path.join(debug_dir, f"{basename}_raw.jpg")
+            cv2.imwrite(raw_image_path, raw_frame)
+            
+            json_path = os.path.join(debug_dir, f"{basename}.json")
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(debug_info, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            log.error(f"[{cam_id}] Error saving debug info: {e}")
 
     # 3. Send API alert
     if file_path and os.path.exists(file_path):
@@ -267,9 +285,22 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
                     annotated_frame_for_alert = draw_transparent_polygon(annotated_frame_for_alert, danger_zone.exterior)
 
+                    try:
+                        debug_info = {
+                            "cam_id": cam_id,
+                            "timestamp": now.isoformat(),
+                            "bboxes": [[float(x) for x in box.xyxy[0]] for box in results.boxes],
+                            "confidences": [float(box.conf[0]) for box in results.boxes],
+                            "classes": [int(box.cls[0]) for box in results.boxes],
+                            "final_intrusion_bboxes": [[float(x) for x in bbox] for bbox in bboxes]
+                        }
+                    except Exception as e:
+                        log.error(f"[{cam_id}] Error preparing debug info: {e}")
+                        debug_info = {}
+
                     alert_thread = threading.Thread(
                         target=handle_alert_in_background,
-                        args=(annotated_frame_for_alert, cam_id),
+                        args=(annotated_frame_for_alert, cam_id, frame.copy(), debug_info),
                         daemon=True
                     )
                     alert_thread.start()

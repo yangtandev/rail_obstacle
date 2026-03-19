@@ -25,9 +25,9 @@ ENABLE_RECORDING = True  # 控制是否啟用自動錄影 (True: 啟用, False: 
 
 api = "https://jenyi-xg.api.ginibio.com/api/v1"
 log.basicConfig(
-    format='%(asctime)s [%(levelname)s] %(message)s', 
-    datefmt='%Y-%m-%d %H:%M:%S', 
-    level=log.INFO, 
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=log.INFO,
     stream=sys.stdout
 )
 models_dir = Path('./models')
@@ -37,7 +37,6 @@ int8_model_det_path = models_dir / 'int8' / f'{model_name}_openvino_model'
 def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     if not os.path.exists(directory):
         os.makedirs(directory)
-        os.makedirs(os.path.join(directory, 'misclassification'))
     image_files = glob.glob(os.path.join(directory, "*.jpg"))
     if len(image_files) >= limit:
         oldest_image = min(image_files, key=os.path.getctime)
@@ -70,11 +69,25 @@ def check_bboxes_in_danger_zone(danger_area_polygon, bboxes, iou_threshold=0.2):
     for bbox in bboxes:
         bbox_poly = box(*bbox)
         if danger_area_polygon.intersects(bbox_poly):
-            intersection_area = danger_area_polygon.intersection(bbox_poly).area
+            intersection = danger_area_polygon.intersection(bbox_poly)
+            intersection_area = intersection.area
             bbox_area = bbox_poly.area
             if bbox_area > 0:
                 ratio = intersection_area / bbox_area
                 if ratio > iou_threshold:
+                    x1, y1, x2, y2 = bbox
+                    bbox_height = y2 - y1
+                    try:
+                        inter_minx, inter_miny, inter_maxx, inter_maxy = intersection.bounds
+                        # 只針對「軌道下方」的人員生效：
+                        # 若 bounding box 的中心 y 座標大於交集區底端，代表這個人絕大部分（下半身）在紅區下方
+                        center_y = (y1 + y2) / 2.0
+                        if center_y > inter_maxy:
+                            # 嚴謹條件：只要腳底距離交集區端點大於身高 10%，就濾除
+                            if inter_maxy < y2 - (bbox_height * 0.1):
+                                continue
+                    except Exception as e:
+                        pass
                     return True
     return False
 
@@ -128,7 +141,7 @@ def handle_alert_in_background(annotated_frame, cam_id):
     This function runs in a background thread to handle all blocking alert operations.
     """
     log.info(f"[{cam_id}] Background alert thread started.")
-    
+
     # 1. Trigger physical alarm
     cam_num = int(cam_id[-3:])
     alert_ip = None
@@ -136,7 +149,7 @@ def handle_alert_in_background(annotated_frame, cam_id):
         alert_ip = '192.168.3.181'
     elif cam_num in range(116, 121):
         alert_ip = '192.168.3.182'
-    
+
     if alert_ip:
         try:
             requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=1', timeout=2)
@@ -150,7 +163,7 @@ def handle_alert_in_background(annotated_frame, cam_id):
     current_date = datetime.datetime.now().strftime("%Y%m%d")
     directory = os.path.join('./saved_images', current_date)
     file_path = save_image_with_limit(annotated_frame, directory, 'detected', cam_id)
-    
+
     # 3. Send API alert
     if file_path and os.path.exists(file_path):
         try:
@@ -165,21 +178,21 @@ def handle_alert_in_background(annotated_frame, cam_id):
 def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording):
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
     cam = Camera(rtsp_link)
-    
+
     log.info(f"[{cam_id}] RTSP 連線完成. 準備載入模型...")
     model = YOLOv10(int8_model_det_path, task='detect')
-    
+
     log.info(f"[{cam_id}] 模型載入完成. 進入影像處理迴圈.")
-    
+
     last_alert_time = 0
     cooldown_period = 5
-    
+
     no_frame_counter = 0
-    reconnect_threshold = 10 
+    reconnect_threshold = 10
 
     # 錄影相關變數
     video_writer = None
-    current_record_hour = None 
+    current_record_hour = None
     if enable_recording:
         record_dir = "./records"
         if not os.path.exists(record_dir):
@@ -190,7 +203,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
             try:
                 tz = ZoneInfo('Asia/Taipei')
                 now = datetime.datetime.now(tz)
-                
+
                 # 下班時間安全收尾
                 if not (8 <= now.hour < 18):
                     if video_writer is not None:
@@ -202,28 +215,28 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                     continue
 
                 t_start = time.time()
-                
+
                 frame = cam.get_data()
-                
+
                 if frame is None:
                     no_frame_counter += 1
                     log.warning(f"[{cam_id}] 警告: 無法取得影像 ({no_frame_counter}/{reconnect_threshold})...")
-                    
+
                     if no_frame_counter >= reconnect_threshold:
                         log.error(f"[{cam_id}] 影像中斷過久，釋放資源並嘗試重新連線...")
                         cam.release()
                         time.sleep(2)
                         cam = Camera(rtsp_link)
                         no_frame_counter = 0
-                        
+
                     time.sleep(1)
                     continue
-                
+
                 no_frame_counter = 0
 
                 frame = cv2.resize(frame, (1280, 720))
 
-                results = model(source=frame, iou=0.5, conf=0.55, verbose=False)[0]
+                results = model(source=frame, iou=0.5, conf=0.45, verbose=False)[0]
 
                 bboxes = []
                 train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
@@ -251,9 +264,9 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                 if is_intrusion and not is_in_cooldown:
                     last_alert_time = current_time
                     annotated_frame_for_alert = results.plot()
-                    
+
                     annotated_frame_for_alert = draw_transparent_polygon(annotated_frame_for_alert, danger_zone.exterior)
-                    
+
                     alert_thread = threading.Thread(
                         target=handle_alert_in_background,
                         args=(annotated_frame_for_alert, cam_id),
@@ -264,14 +277,14 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                 # --- 修改後的 Display Logic：永遠顯示 YOLO 的辨識框 ---
                 display_frame = results.plot()
                 final_display_frame = draw_transparent_polygon(display_frame, danger_zone.exterior)
-                
+
                 if not display_queue.full():
                     display_queue.put((cam_id, final_display_frame))
-                
+
                 # 自動換檔與寫入錄影
                 if enable_recording:
                     current_hour = now.hour
-                    
+
                     # 發現跨越到下一個小時了，先關閉目前的寫入器
                     if video_writer is not None and current_record_hour != current_hour:
                         video_writer.release()
@@ -286,7 +299,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                         video_writer = cv2.VideoWriter(record_path, fourcc, 15.0, (1920, 1080))
                         current_record_hour = current_hour
                         log.info(f"[{cam_id}] 🔴 開始錄製此小時區段影片: {record_path}")
-                    
+
                     record_frame = cv2.resize(final_display_frame, (1920, 1080))
                     video_writer.write(record_frame)
 
@@ -300,10 +313,10 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
 def main():
     active_camera_ids = [
-        "1921683111", 
-        #"1921683113", 
-        #"1921683115", 
-        #"1921683118", 
+        "1921683111",
+        #"1921683113",
+        #"1921683115",
+        #"1921683118",
         "1921683120"
     ]
 
@@ -315,12 +328,12 @@ def main():
         "rtsp://192.168.3.201:9554/live/192.168.3.120"
     ]
     area_files = [f'./mask/{cam_id}.txt' for cam_id in active_camera_ids]
-    
+
     danger_zones = read_areas(area_files)
 
     display_queue = Queue(maxsize=len(active_camera_ids) * 2)
     stop_event = Event()
-    
+
     if ENABLE_RECORDING:
         log.info("系統設定：自動錄影功能已啟用 (8~18點間將自動分段錄影)")
     else:
@@ -336,7 +349,7 @@ def main():
         processes.append(process)
         process.start()
         time.sleep(2)
-        
+
     log.info("All camera processes started. Starting display loop.")
 
     latest_frames = {}
@@ -360,7 +373,7 @@ def main():
                 log.info("Quit signal received. Shutting down.")
                 stop_event.set()
                 break
-            
+
             # 保留手動截圖快捷鍵 's'
             elif key in [ord('s'), ord('S')]:
                 save_dir = "./exhibition_shots"
@@ -371,7 +384,7 @@ def main():
                     filename = os.path.join(save_dir, f"exhibition_cam{c_id}_{timestamp}.jpg")
                     cv2.imwrite(filename, f)
                 log.info(f"📸 參展截圖已儲存至 {save_dir} 資料夾！")
-            
+
             time.sleep(0.01)
 
     except KeyboardInterrupt:
@@ -385,7 +398,7 @@ def main():
             if process.is_alive():
                 log.warning(f"Process {process.pid} did not terminate gracefully. Terminating.")
                 process.terminate()
-        
+
         cv2.destroyAllWindows()
         log.info("Shutdown complete.")
 

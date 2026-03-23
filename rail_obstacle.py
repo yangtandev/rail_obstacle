@@ -80,13 +80,9 @@ def check_bboxes_in_danger_zone(danger_area_polygon, bboxes, iou_threshold=0.2):
                     bbox_height = y2 - y1
                     try:
                         inter_minx, inter_miny, inter_maxx, inter_maxy = intersection.bounds
-                        # 只針對「軌道下方」的人員生效：
-                        # 若 bounding box 的中心 y 座標大於交集區底端，代表這個人絕大部分（下半身）在紅區下方
-                        center_y = (y1 + y2) / 2.0
-                        if center_y > inter_maxy:
-                            # 嚴謹條件：只要腳底距離交集區端點大於身高 10%，就濾除
-                            if inter_maxy < y2 - (bbox_height * 0.1):
-                                continue
+                        # 只要腳底部距離交集區端點大於身高 10% (代表物件在紅色區域外下方的面積達整體的 10% 以上)，就濾除
+                        if inter_maxy < y2 - (bbox_height * 0.1):
+                            continue
                     except Exception as e:
                         pass
                     return True

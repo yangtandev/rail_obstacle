@@ -38,12 +38,12 @@ int8_model_det_path = models_dir / 'int8' / f'{model_name}_openvino_model'
 def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     if not os.path.exists(directory):
         os.makedirs(directory)
-    image_files = glob.glob(os.path.join(directory, "*.jpg"))
+    image_files = glob.glob(os.path.join(directory, "*.jpg")) + glob.glob(os.path.join(directory, "*.png"))
     if len(image_files) >= limit:
         oldest_image = min(image_files, key=os.path.getctime)
         os.remove(oldest_image)
     timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
-    image_path = os.path.join(directory, f"{folder_name}_cam{cam_id}_{timestamp}.jpg")
+    image_path = os.path.join(directory, f"{folder_name}_cam{cam_id}_{timestamp}.png")
     cv2.imwrite(image_path, image)
     return image_path
 
@@ -173,7 +173,7 @@ def handle_alert_in_background(annotated_frame, cam_id, raw_frame=None, debug_in
                 os.makedirs(debug_dir)
             
             basename = os.path.splitext(os.path.basename(file_path))[0]
-            raw_image_path = os.path.join(debug_dir, f"{basename}_raw.jpg")
+            raw_image_path = os.path.join(debug_dir, f"{basename}_raw.png")
             cv2.imwrite(raw_image_path, raw_frame)
             
             json_path = os.path.join(debug_dir, f"{basename}.json")
@@ -216,6 +216,11 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
         if not os.path.exists(record_dir):
             os.makedirs(record_dir)
 
+    # 歷史遮罩追蹤參數 (Temporal Tracking Mask)
+    train_history_bboxes = []
+    train_history_ttl = 0
+    MAX_TTL = 15  # 記憶存活幀數 (假設約為 1 秒)
+
     try:
         while not stop_event.is_set():
             try:
@@ -254,24 +259,58 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
                 frame = cv2.resize(frame, (1280, 720))
 
+                # 恢復全域預設門檻 0.45
                 results = model(source=frame, iou=0.5, conf=0.45, verbose=False)[0]
 
+                # 建立列車遮罩 (此處已全是大於 0.45 的結果)
+                current_train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
+                
+                # --- 時序追蹤 (Temporal Tracking) 邏輯 ---
+                if current_train_bboxes:
+                    # 如果當前幀有抓到輕軌，更新記憶庫並重置 TTL
+                    train_history_bboxes = current_train_bboxes
+                    train_history_ttl = MAX_TTL
+                else:
+                    # 如果當前幀沒抓到，但還有 TTL 壽命，則扣除壽命並延用上一幀的遮罩
+                    if train_history_ttl > 0:
+                        train_history_ttl -= 1
+                    else:
+                        train_history_bboxes = []
+                
+                # 最終有效遮罩 (來自當前或歷史記憶)
+                active_train_bboxes = train_history_bboxes
                 bboxes = []
-                train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
+                
                 for result in results.boxes:
                     bbox = result.xyxy[0]
                     cls = int(result.cls[0])
+                    conf = float(result.conf[0])
 
-                    box_width = bbox[2] - bbox[0]
-                    box_height = bbox[3] - bbox[1]
-                    frame_height = frame.shape[0]
-                    frame_width = frame.shape[1]
-                    if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
-                        continue
-
-                    if cls == 1 or any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in train_bboxes):
+                    # 過濾邏輯
+                    if cls == 1:
+                        # 列車(Train)本身不為入侵告警目標
                         continue
                     else:
+                        box_width = bbox[2] - bbox[0]
+                        box_height = bbox[3] - bbox[1]
+                        frame_height = frame.shape[0]
+                        frame_width = frame.shape[1]
+                        
+                        # 尺寸過濾限制
+                        if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
+                            continue
+
+                        # 邊緣防禦過濾 (針對畫面左右外側 10% 範圍，需要更高的信心度 > 0.75)
+                        center_x = (bbox[0] + bbox[2]) / 2.0
+                        if center_x <= frame_width * 0.1 or center_x >= frame_width * 0.9:
+                            if conf < 0.75:
+                                continue # 在邊緣且信心度不足，視為邊緣雜訊誤判拋棄
+
+                        # 是否與任何被捕捉到的輕軌高度重疊 (包含正在記憶體存活的歷史車影)
+                        if any(calculate_overlap_ratio(bbox, train_bbox) > 0.8 for train_bbox in active_train_bboxes):
+                            continue
+
+                        # 通過所有嚴格檢驗，加入有效入侵檢測框
                         bboxes.append(bbox)
                 is_intrusion = bboxes and check_bboxes_in_danger_zone(danger_zone, bboxes)
 

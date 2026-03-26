@@ -21,11 +21,9 @@ dist/
 logs/
 *.log
 saved_images/
+records/
+exhibition_shots/
 runs/
-
-
-# Temp directories
-download-ripgrepzDRkg3/
 
 # Documentation
 *.docx

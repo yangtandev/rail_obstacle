@@ -21,7 +21,7 @@ os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
 
 # ================= 系統全域設定 =================
-ENABLE_RECORDING = True  # 控制是否啟用自動錄影 (True: 啟用, False: 停用)
+ENABLE_RECORDING = False  # 控制是否啟用自動錄影 (True: 啟用, False: 停用)
 # ================================================
 
 api = "https://jenyi-xg.api.ginibio.com/api/v1"
@@ -167,11 +167,11 @@ def handle_alert_in_background(annotated_frame, cam_id, raw_frame=None, debug_in
             debug_dir = os.path.join(directory, 'debug')
             if not os.path.exists(debug_dir):
                 os.makedirs(debug_dir)
-            
+
             basename = os.path.splitext(os.path.basename(file_path))[0]
             raw_image_path = os.path.join(debug_dir, f"{basename}_raw.png")
             cv2.imwrite(raw_image_path, raw_frame)
-            
+
             json_path = os.path.join(debug_dir, f"{basename}.json")
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(debug_info, f, ensure_ascii=False, indent=4)
@@ -224,14 +224,14 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                 now = datetime.datetime.now(tz)
 
                 # 下班時間安全收尾
-                if not (8 <= now.hour < 18):
-                    if video_writer is not None:
-                        video_writer.release()
-                        video_writer = None
-                        current_record_hour = None
-                        log.info(f"[{cam_id}] ⏹️ 進入非辨識時段，自動停止錄影並封裝存檔。")
-                    time.sleep(30)
-                    continue
+                # if not (8 <= now.hour < 18):
+                #     if video_writer is not None:
+                #         video_writer.release()
+                #         video_writer = None
+                #         current_record_hour = None
+                #         log.info(f"[{cam_id}] ⏹️ 進入非辨識時段，自動停止錄影並封裝存檔。")
+                #     time.sleep(30)
+                #     continue
 
                 t_start = time.time()
 
@@ -260,7 +260,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
                 # 建立列車遮罩 (此處已全是大於 0.45 的結果)
                 current_train_bboxes = [result.xyxy[0] for result in results.boxes if int(result.cls[0]) == 1]
-                
+
                 # --- 時序追蹤 (Temporal Tracking) 邏輯 ---
                 if current_train_bboxes:
                     # 如果當前幀有抓到輕軌，更新記憶庫並重置 TTL
@@ -272,11 +272,11 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                         train_history_ttl -= 1
                     else:
                         train_history_bboxes = []
-                
+
                 # 最終有效遮罩 (來自當前或歷史記憶)
                 active_train_bboxes = train_history_bboxes
                 bboxes = []
-                
+
                 for result in results.boxes:
                     bbox = result.xyxy[0]
                     cls = int(result.cls[0])
@@ -291,7 +291,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                         box_height = bbox[3] - bbox[1]
                         frame_height = frame.shape[0]
                         frame_width = frame.shape[1]
-                        
+
                         # 尺寸過濾限制
                         if box_width > frame_width * 0.5 or box_height > frame_height * 0.5:
                             continue
@@ -387,11 +387,13 @@ def main():
     ]
 
     rtsp_links = [
-        "rtsp://192.168.3.201:9554/live/192.168.3.111",
+        # "rtsp://192.168.3.201:9554/live/192.168.3.111",
         #"rtsp://192.168.3.201:9554/live/192.168.3.113",
         #"rtsp://192.168.3.201:9554/live/192.168.3.115",
         #"rtsp://192.168.3.201:9554/live/192.168.3.118",
-        "rtsp://192.168.3.201:9554/live/192.168.3.120"
+        # "rtsp://192.168.3.201:9554/live/192.168.3.120"
+        "rtsp://111.70.11.75:9554/live/192.168.3.111",
+        "rtsp://111.70.11.75:9554/live/192.168.3.120"
     ]
     area_files = [f'./mask/{cam_id}.txt' for cam_id in active_camera_ids]
 

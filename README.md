@@ -14,6 +14,40 @@ This project implements a real-time rail obstacle detection system designed to m
 *   **Flexible Input Sources**: Supports both HTTP-based JPG image URLs and RTSP video streams.
 *   **Robust Processing**: Employs multi-processing and multi-threading for concurrent frame acquisition and detection, with graceful handling of processing timeouts.
 
+## Project Structure
+```
+rail_obstacle/
+├── rail_obstacle.py          # Main application entry point
+├── camera.py                 # Camera module (RTSP stream handler)
+├── requirements.txt          # Python dependencies
+├── README.md
+├── .gitignore
+├── .gitattributes
+├── models/                   # Trained model files
+│   ├── rail_obstacle.pt      # Original PyTorch weights
+│   └── int8/                 # INT8 quantized OpenVINO model (used at runtime)
+│       └── rail_obstacle_openvino_model/
+├── mask/                     # Danger zone coordinates per camera
+│   ├── {cam_id}.jpg          # Danger zone visualization
+│   └── {cam_id}.txt          # Polygon coordinates (x,y per line)
+├── image/                    # Camera snapshots (used by tools/ele_test.py)
+├── datasets/                 # Training dataset configuration
+│   └── rail_obstacle.yaml
+├── saved_images/             # Detection result screenshots (runtime output)
+└── tools/                    # Data processing & setup utilities
+    ├── ele_test.py            # Interactive danger zone drawing tool
+    ├── crawl_pic.py           # Training image crawler
+    ├── json_to_txt.py         # COCO JSON → YOLO TXT converter
+    ├── change_multi_cls.py    # Batch class ID remapping
+    ├── delete_and_relabel_classes.py
+    ├── delete_blank_pic_N_txt.py
+    ├── delete_unmatched_jpgs.py
+    ├── generate_white_txt.py
+    ├── move_dateset.py
+    ├── train_val_shuffle.py
+    └── copy_yolov10_int8_dataset.py
+```
+
 ## Installation
 
 ### Prerequisites
@@ -24,8 +58,6 @@ This project implements a real-time rail obstacle detection system designed to m
 *   `requests`
 *   `shapely`
 *   `numpy`
-*   `screeninfo`
-*   `Pillow`
 *   Git LFS (for model files)
 
 ### Steps
@@ -54,7 +86,6 @@ This project implements a real-time rail obstacle detection system designed to m
     ```bash
     pip install -r requirements.txt
     ```
-    *(Note: Ensure `requirements.txt` contains all necessary packages. If not, you may need to add them manually or generate a new one.)*
 
 ## Usage & Deployment
 
@@ -62,10 +93,10 @@ This project implements a real-time rail obstacle detection system designed to m
 *   **Camera IDs and URLs**: Modify the `active_camera_ids` list and `rtsp_links` generation in `rail_obstacle.py` to match your camera setup.
     *   For HTTP JPG sources: `rtsp_links = [f"http://your.ip.address/image/{cam_id}.jpg" for cam_id in active_camera_ids]`
     *   For RTSP streams: `rtsp_links = ["rtsp://your.rtsp.stream/url1", "rtsp://your.rtsp.stream/url2"]`
-*   **Danger Zones**: Define polygonal danger zones for each camera in `mask/{cam_id}.txt` files. Each line in the file should contain `x,y` coordinates.
+*   **Danger Zones**: Define polygonal danger zones for each camera in `mask/{cam_id}.txt` files. Each line in the file should contain `x,y` coordinates. You can use `tools/ele_test.py` to interactively draw danger zones on camera snapshots.
 *   **Model Path**: The system expects the OpenVINO model to be located at `models/int8/rail_obstacle_openvino_model/`. Ensure your model files (`.xml`, `.bin`) are present there.
 *   **Alert API**: The `api` variable in `rail_obstacle.py` (`https://jenyi-xg.api.ginibio.com/api/v1`) is used for intrusion logging. Adjust if necessary.
-*   **Alert Device IPs**: The `process_detection_task` function contains logic for triggering external alerts based on camera ID ranges (`192.168.3.181`, `192.168.3.182`). Modify this logic to suit your alert hardware and network configuration.
+*   **Alert Device IPs**: The `handle_alert_in_background` function contains logic for triggering external alerts based on camera ID ranges (`192.168.3.181`, `192.168.3.182`). Modify this logic to suit your alert hardware and network configuration.
 
 ### Running the Application
 To start the detection system:
@@ -94,9 +125,36 @@ WantedBy=multi-user.target
 ```
 *(Note: You would need to create this file, place it in `/etc/systemd/system/`, and then enable and start it: `sudo systemctl enable rail_obstacle.service && sudo systemctl start rail_obstacle.service`)*
 
+## Tools
+
+The `tools/` directory contains standalone utility scripts for data preparation and system setup. These are **not** required for running the main detection system.
+
+### Danger Zone Setup
+*   **`tools/ele_test.py`** — Interactive tool to draw polygonal danger zones on camera snapshots. Left-click to add points, double-click to confirm, right-click to clear.
+
+### Image Labeling
+For manually labeling training images, we recommend using [LabelImg](https://github.com/HumanSignal/labelImg), an open-source graphical image annotation tool that supports YOLO format output.
+
+Install and run via pip:
+```bash
+pip install labelImg
+labelImg
+```
+
+### Data Processing
+*   `tools/json_to_txt.py` — Convert COCO JSON annotations to YOLO TXT format.
+*   `tools/change_multi_cls.py` — Batch remap class IDs in annotation files.
+*   `tools/delete_and_relabel_classes.py` — Delete specific classes and renumber remaining ones.
+*   `tools/delete_blank_pic_N_txt.py` — Remove empty annotation files and their corresponding images.
+*   `tools/delete_unmatched_jpgs.py` — Remove images without matching annotation files.
+*   `tools/generate_white_txt.py` — Generate empty annotation files for unlabeled images.
+*   `tools/move_dateset.py` — Move paired image/annotation files between directories.
+*   `tools/train_val_shuffle.py` — Randomly split dataset into train/validation sets.
+*   `tools/copy_yolov10_int8_dataset.py` — Copy and organize dataset into YOLOv10 format structure.
+*   `tools/crawl_pic.py` — Crawl training images from the web using Selenium.
+
 ## Configuration Notes
 *   **Path Adjustments**: Ensure all hardcoded paths in `rail_obstacle.py` (e.g., `models/`, `mask/`, `saved_images/`) are correct relative to the project root or are absolute paths.
-*   **Performance**: The `timeout=0.01` in `rail_obstacle.py`'s `main_loop` is set for responsiveness. If you experience high CPU usage or missed frames, you might need to adjust this value or optimize your model further.
 *   **OpenCV FFMPEG Warnings**: The `VIDEOIO(FFMPEG)` warnings in the logs often indicate issues with OpenCV's ability to capture video by name or specific backend configurations. Ensure your OpenCV installation has proper FFMPEG support and that camera URLs are correct.
 
 ## Contributing

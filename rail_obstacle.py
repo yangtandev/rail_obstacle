@@ -20,11 +20,18 @@ from camera import Camera
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
 
-# ================= 系統全域設定 =================
-ENABLE_RECORDING = False  # 控制是否啟用自動錄影 (True: 啟用, False: 停用)
-# ================================================
-
-api = "https://jenyi-xg.api.ginibio.com/api/v1"
+def load_config(config_path=None):
+    """從 config.json 讀取部署設定"""
+    if config_path is None:
+        config_path = Path(__file__).parent / 'config.json'
+    else:
+        config_path = Path(config_path)
+    if not config_path.exists():
+        log.error(f"找不到設定檔: {config_path}")
+        log.error("請先執行 sudo ./install.sh 或手動編輯 config.json")
+        sys.exit(1)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 log.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
@@ -126,32 +133,20 @@ def alert_api(image, api, location):
     except Exception as e:
         log.error(f"Error during API call: {e}")
 
-def get_location_id_from_str(cam_id_str):
-    cam_num = int(cam_id_str[-3:])
-    if cam_num == 111:
-        return 10026
-    else:
-        return 10037 + (cam_num - 112)
 
-def handle_alert_in_background(annotated_frame, cam_id, raw_frame=None, debug_info=None):
+
+def handle_alert_in_background(annotated_frame, cam_id, api_url, alert_device_ip, location_id, raw_frame=None, debug_info=None):
     """
     This function runs in a background thread to handle all blocking alert operations.
     """
     log.info(f"[{cam_id}] Background alert thread started.")
 
     # 1. Trigger physical alarm
-    cam_num = int(cam_id[-3:])
-    alert_ip = None
-    if cam_num in range(111, 116):
-        alert_ip = '192.168.3.181'
-    elif cam_num in range(116, 121):
-        alert_ip = '192.168.3.182'
-
-    if alert_ip:
+    if alert_device_ip:
         try:
-            requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=1', timeout=2)
+            requests.get(f'http://{alert_device_ip}:1880/gpio_out?pin=12&st=1', timeout=2)
             time.sleep(5)
-            requests.get(f'http://{alert_ip}:1880/gpio_out?pin=12&st=0', timeout=2)
+            requests.get(f'http://{alert_device_ip}:1880/gpio_out?pin=12&st=0', timeout=2)
             log.info(f"[{cam_id}] Alarm cycle completed.")
         except requests.exceptions.RequestException as e:
             log.error(f"[{cam_id}] Failed to trigger alarm: {e}")
@@ -184,12 +179,11 @@ def handle_alert_in_background(annotated_frame, cam_id, raw_frame=None, debug_in
             saved_image = cv2.imread(file_path)
             if saved_image is not None:
                 base64_image = image2base64(saved_image)
-                location_id = get_location_id_from_str(cam_id)
-                alert_api(base64_image, api, location_id)
+                alert_api(base64_image, api_url, location_id)
         except Exception as e:
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
-def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording):
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id):
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
     cam = Camera(rtsp_link)
 
@@ -335,7 +329,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
                     alert_thread = threading.Thread(
                         target=handle_alert_in_background,
-                        args=(annotated_frame_for_alert, cam_id, frame.copy(), debug_info),
+                        args=(annotated_frame_for_alert, cam_id, api_url, alert_device_ip, location_id, frame.copy(), debug_info),
                         daemon=True
                     )
                     alert_thread.start()
@@ -378,40 +372,30 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
         cam.release()
 
 def main():
-    active_camera_ids = [
-        "1921683111",
-        #"1921683113",
-        #"1921683115",
-        #"1921683118",
-        "1921683120"
-    ]
+    config = load_config()
+    api_url = config['api_url']
+    enable_recording = config.get('enable_recording', False)
+    cameras = config['cameras']
 
-    rtsp_links = [
-        # "rtsp://192.168.3.201:9554/live/192.168.3.111",
-        #"rtsp://192.168.3.201:9554/live/192.168.3.113",
-        #"rtsp://192.168.3.201:9554/live/192.168.3.115",
-        #"rtsp://192.168.3.201:9554/live/192.168.3.118",
-        # "rtsp://192.168.3.201:9554/live/192.168.3.120"
-        "rtsp://111.70.11.75:9554/live/192.168.3.111",
-        "rtsp://111.70.11.75:9554/live/192.168.3.120"
-    ]
+    active_camera_ids = [cam['id'] for cam in cameras]
     area_files = [f'./mask/{cam_id}.txt' for cam_id in active_camera_ids]
 
     danger_zones = read_areas(area_files)
 
-    display_queue = Queue(maxsize=len(active_camera_ids) * 2)
+    display_queue = Queue(maxsize=len(cameras) * 2)
     stop_event = Event()
 
-    if ENABLE_RECORDING:
+    if enable_recording:
         log.info("系統設定：自動錄影功能已啟用 (8~18點間將自動分段錄影)")
     else:
         log.info("系統設定：自動錄影功能已停用")
 
     processes = []
-    for i, cam_id in enumerate(active_camera_ids):
+    for i, cam in enumerate(cameras):
         process = Process(
             target=camera_process_worker,
-            args=(rtsp_links[i], cam_id, danger_zones[i], display_queue, stop_event, ENABLE_RECORDING),
+            args=(cam['rtsp_url'], cam['id'], danger_zones[i], display_queue, stop_event, enable_recording,
+                  api_url, cam.get('alert_device_ip'), cam.get('location_id')),
             daemon=True
         )
         processes.append(process)

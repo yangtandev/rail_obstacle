@@ -1,0 +1,18 @@
+{
+    "api_url": "https://jenyi-xg.api.ginibio.com/api/v1",
+    "enable_recording": false,
+    "cameras": [
+        {
+            "id": "1921683111",
+            "rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.111",
+            "alert_device_ip": "192.168.3.181",
+            "location_id": 10026
+        },
+        {
+            "id": "1921683120",
+            "rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.120",
+            "alert_device_ip": "192.168.3.182",
+            "location_id": 10045
+        }
+    ]
+}

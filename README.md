@@ -17,7 +17,7 @@ This project implements a real-time rail obstacle detection system designed to m
 ## Project Structure
 ```
 rail_obstacle/
-├── rail_obstacle.py          # Main application entry point
+├── main.py          # Main application entry point
 ├── camera.py                 # Camera module (RTSP stream handler)
 ├── requirements.txt          # Python dependencies
 ├── README.md
@@ -90,19 +90,19 @@ rail_obstacle/
 ## Usage & Deployment
 
 ### Configuration
-*   **Camera IDs and URLs**: Modify the `active_camera_ids` list and `rtsp_links` generation in `rail_obstacle.py` to match your camera setup.
+*   **Camera IDs and URLs**: Modify the `active_camera_ids` list and `rtsp_links` generation in `main.py` to match your camera setup.
     *   For HTTP JPG sources: `rtsp_links = [f"http://your.ip.address/image/{cam_id}.jpg" for cam_id in active_camera_ids]`
     *   For RTSP streams: `rtsp_links = ["rtsp://your.rtsp.stream/url1", "rtsp://your.rtsp.stream/url2"]`
 *   **Danger Zones**: Define polygonal danger zones for each camera in `mask/{cam_id}.txt` files. Each line in the file should contain `x,y` coordinates. You can use `tools/ele_test.py` to interactively draw danger zones on camera snapshots.
 *   **Model Path**: The system expects the OpenVINO model to be located at `models/int8/rail_obstacle_openvino_model/`. Ensure your model files (`.xml`, `.bin`) are present there.
-*   **Alert API**: The `api` variable in `rail_obstacle.py` (`https://jenyi-xg.api.ginibio.com/api/v1`) is used for intrusion logging. Adjust if necessary.
+*   **Alert API**: The `api` variable in `main.py` (`https://jenyi-xg.api.ginibio.com/api/v1`) is used for intrusion logging. Adjust if necessary.
 *   **Alert Device IPs**: The `handle_alert_in_background` function contains logic for triggering external alerts based on camera ID ranges (`192.168.3.181`, `192.168.3.182`). Modify this logic to suit your alert hardware and network configuration.
 
 ### Running the Application
 To start the detection system:
 ```bash
 source venv/bin/activate
-python rail_obstacle.py
+python main.py
 ```
 
 ### Systemd Service (Example)
@@ -115,7 +115,7 @@ After=network.target
 [Service]
 User=gini-facetest
 WorkingDirectory=/home/gini-facetest/rail_obstacle
-ExecStart=/home/gini-facetest/rail_obstacle/venv/bin/python /home/gini-facetest/rail_obstacle/rail_obstacle.py
+ExecStart=/home/gini-facetest/rail_obstacle/venv/bin/python /home/gini-facetest/rail_obstacle/main.py
 Restart=always
 StandardOutput=journal
 StandardError=journal
@@ -154,7 +154,7 @@ labelImg
 *   `tools/crawl_pic.py` — Crawl training images from the web using Selenium.
 
 ## Configuration Notes
-*   **Path Adjustments**: Ensure all hardcoded paths in `rail_obstacle.py` (e.g., `models/`, `mask/`, `saved_images/`) are correct relative to the project root or are absolute paths.
+*   **Path Adjustments**: Ensure all hardcoded paths in `main.py` (e.g., `models/`, `mask/`, `saved_images/`) are correct relative to the project root or are absolute paths.
 *   **OpenCV FFMPEG Warnings**: The `VIDEOIO(FFMPEG)` warnings in the logs often indicate issues with OpenCV's ability to capture video by name or specific backend configurations. Ensure your OpenCV installation has proper FFMPEG support and that camera URLs are correct.
 
 ## Contributing

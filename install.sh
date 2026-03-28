@@ -320,7 +320,7 @@ Type=simple
 User=${ACTUAL_USER}
 Group=$(id -gn "${ACTUAL_USER}")
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=${python_bin} ${PROJECT_DIR}/rail_obstacle.py
+ExecStart=${python_bin} ${PROJECT_DIR}/main.py
 Restart=always
 RestartSec=10
 

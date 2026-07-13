@@ -1,7 +1,7 @@
 {
 	"api_url": "https://jenyi-xg.api.ginibio.com/api/v1",
 	"enable_recording": false,
-	"inference_fps": 8,
+	"inference_fps": 5,
 	"inference_threads": 1,
 	"cameras": [
 		{

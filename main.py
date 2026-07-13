@@ -69,6 +69,25 @@ def image2base64(image):
     else:
         raise ValueError("Failed to encode image")
 
+def limit_openvino_threads(inference_threads):
+    if inference_threads <= 0:
+        return
+    import openvino as ov
+
+    original_compile_model = ov.Core.compile_model
+    if getattr(original_compile_model, '_rail_obstacle_patched', False):
+        return
+
+    def compile_model(self, model, device_name=None, config=None, *args, **kwargs):
+        config = dict(config or {})
+        config['INFERENCE_NUM_THREADS'] = inference_threads
+        if device_name == 'AUTO':
+            device_name = 'CPU'
+        return original_compile_model(self, model, device_name=device_name, config=config, *args, **kwargs)
+
+    compile_model._rail_obstacle_patched = True
+    ov.Core.compile_model = compile_model
+
 def read_areas(area_files):
     polygons = []
     for file_path in area_files:
@@ -217,7 +236,7 @@ def handle_alert_in_background(annotated_frame, cam_id, api_url, alert_device_ip
         except Exception as e:
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
-def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id, inference_fps):
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id, inference_fps, inference_threads):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
@@ -237,6 +256,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
         time.sleep(0.1)
 
     log.info(f"[{cam_id}] RTSP 連線完成. 準備載入模型...")
+    limit_openvino_threads(inference_threads)
     model = YOLOv10(int8_model_det_path, task='detect')
 
     log.info(f"[{cam_id}] 模型載入完成. 進入影像處理迴圈.")
@@ -457,6 +477,7 @@ def main():
     api_url = config['api_url']
     enable_recording = config.get('enable_recording', False)
     inference_fps = float(config.get('inference_fps', config.get('target_fps', 8)))
+    inference_threads = int(config.get('inference_threads', 1))
     cameras = config['cameras']
 
     active_camera_ids = [cam['id'] for cam in cameras]
@@ -477,7 +498,7 @@ def main():
         process = Process(
             target=camera_process_worker,
             args=(cam['rtsp_url'], cam['id'], danger_zones[i], display_queue, stop_event, enable_recording,
-                  api_url, cam.get('alert_device_ip'), cam.get('location_id'), inference_fps),
+                  api_url, cam.get('alert_device_ip'), cam.get('location_id'), inference_fps, inference_threads),
             daemon=True
         )
         processes.append(process)

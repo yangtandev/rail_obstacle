@@ -236,7 +236,7 @@ def handle_alert_in_background(annotated_frame, cam_id, api_url, alert_device_ip
         except Exception as e:
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
-def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id, inference_fps, inference_threads):
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id, inference_fps, inference_threads, min_alert_conf_other):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
@@ -379,6 +379,9 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                         # 列車(Train)本身不為入侵告警目標
                         continue
                     else:
+                        if conf < min_alert_conf_other:
+                            continue
+
                         box_width = bbox[2] - bbox[0]
                         box_height = bbox[3] - bbox[1]
                         frame_height = frame.shape[0]
@@ -478,6 +481,7 @@ def main():
     enable_recording = config.get('enable_recording', False)
     inference_fps = float(config.get('inference_fps', config.get('target_fps', 8)))
     inference_threads = int(config.get('inference_threads', 1))
+    min_alert_conf_other = float(config.get('min_alert_conf_other', 0.6))
     cameras = config['cameras']
 
     active_camera_ids = [cam['id'] for cam in cameras]
@@ -498,7 +502,8 @@ def main():
         process = Process(
             target=camera_process_worker,
             args=(cam['rtsp_url'], cam['id'], danger_zones[i], display_queue, stop_event, enable_recording,
-                  api_url, cam.get('alert_device_ip'), cam.get('location_id'), inference_fps, inference_threads),
+                  api_url, cam.get('alert_device_ip'), cam.get('location_id'), inference_fps, inference_threads,
+                  min_alert_conf_other),
             daemon=True
         )
         processes.append(process)

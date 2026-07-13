@@ -209,15 +209,17 @@ graph TD
 
     RAW --> F0["Layer 0: 類別過濾<br/>cls==1 列車 → 跳過<br/>列車本身不是入侵目標"]
 
-    F0 --> F1["Layer 1: 尺寸過濾<br/>寬 大於 50% 畫面寬 → 拋棄<br/>高 大於 50% 畫面高 → 拋棄<br/>防止整幀誤判為單一物件"]
+    F0 --> F1["Layer 1: other 告警信心度過濾<br/>conf 小於 min_alert_conf_other → 拋棄<br/>預設 0.6，避免低信心 other 誤報"]
 
-    F1 --> F2["Layer 2: 邊緣防禦過濾<br/>中心 x 在左右 10% 邊緣<br/>且 conf 小於 0.75 → 拋棄<br/>攝影機邊緣光線畸變容易產生幽靈框"]
+    F1 --> F2["Layer 2: 尺寸過濾<br/>寬 大於 50% 畫面寬 → 拋棄<br/>高 大於 50% 畫面高 → 拋棄<br/>防止整幀誤判為單一物件"]
 
-    F2 --> F3["Layer 3: 列車遮罩過濾<br/>與任何列車框重疊大於 80% → 拋棄<br/>使用 Temporal Tracking<br/>列車車身上的紋理常被誤判為人或物"]
+    F2 --> F3["Layer 3: 邊緣防禦過濾<br/>中心 x 在左右 10% 邊緣<br/>且 conf 小於 0.75 → 拋棄<br/>攝影機邊緣光線畸變容易產生幽靈框"]
 
-    F3 --> F4["Layer 4: 危險區域碰撞<br/>check_bboxes_in_danger_zone<br/>與多邊形 IOU 大於 20% → 通過<br/>加上腳底超出紅區大於 10% → 拋棄<br/>鳥類飛越軌道時不應告警"]
+    F3 --> F4["Layer 4: 列車遮罩過濾<br/>與任何列車框重疊大於 80% → 拋棄<br/>使用 Temporal Tracking<br/>列車車身上的紋理常被誤判為人或物"]
 
-    F4 --> RESULT{{"入侵確認？"}}
+    F4 --> F5["Layer 5: 危險區域碰撞<br/>check_bboxes_in_danger_zone<br/>與多邊形 IOU 大於 20% → 通過<br/>加上腳底超出紅區大於 10% → 拋棄<br/>鳥類飛越軌道時不應告警"]
+
+    F5 --> RESULT{{"入侵確認？"}}
     RESULT -->|"是 + 冷卻期已過"| ALERT["觸發告警"]
     RESULT -->|"否"| NEXT["繼續下一幀"]
 ```

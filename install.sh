@@ -187,6 +187,7 @@ collect_config() {
 {
     "api_url": "${api_url}",
     "enable_recording": ${enable_recording},
+    "min_alert_conf_other": 0.6,
     "cameras": [${cameras_json}
     ]
 }

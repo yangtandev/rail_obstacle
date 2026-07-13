@@ -3,6 +3,7 @@
 	"enable_recording": false,
 	"inference_fps": 5,
 	"inference_threads": 1,
+	"min_alert_conf_other": 0.6,
 	"cameras": [
 		{
 			"id": "1921683111",

@@ -10,7 +10,7 @@ set -euo pipefail
 # ======================== Configuration ========================
 SERVICE_NAME="rail_obstacle"
 PYTHON_VERSION="3.12"
-VENV_DIR=".venv"
+VENV_DIR="venv"
 # ===============================================================
 
 # Colors

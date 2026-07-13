@@ -333,7 +333,7 @@ sudo ./install.sh
 1. 安裝系統依賴（`git`, `git-lfs`, OpenCV 執行期函式庫）
 2. 安裝 [uv](https://docs.astral.sh/uv/)（Rust 驅動的 Python 套件管理器，取代 pip）
 3. 透過 uv 下載 Python 3.12（無需 deadsnakes PPA 或系統 Python）
-4. 建立 `.venv` 虛擬環境並安裝所有 Python 依賴
+4. 建立 `venv` 虛擬環境並安裝所有 Python 依賴
 5. 拉取 Git LFS 模型檔案
 6. 建立 systemd user 服務並自動啟動
 

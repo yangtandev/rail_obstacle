@@ -1,5 +1,9 @@
 # Release Notes
 
+## v1.1.2 - 2026-07-13
+
+- 補上 `huggingface-hub` Python 依賴，修正全新安裝後缺少 `huggingface_hub` 模組的問題。
+
 ## v1.1.1 - 2026-07-13
 
 - 修正部分 HEVC RTSP 串流在 OpenCV 解碼失敗，導致長時間無法取得畫面的問題。

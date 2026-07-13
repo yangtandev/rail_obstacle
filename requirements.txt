@@ -5,4 +5,5 @@ openvino-dev
 ultralytics==8.1.34
 shapely
 requests
+huggingface-hub
 git+https://github.com/THU-MIG/yolov10.git

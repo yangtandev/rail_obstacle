@@ -1,5 +1,9 @@
 # Release Notes
 
+## v1.1.3 - 2026-07-13
+
+- 新增攝影機推論 FPS 上限設定，預設每路 8 FPS，降低多路 RTSP 推論造成的 CPU load。
+
 ## v1.1.2 - 2026-07-13
 
 - 補上 `huggingface-hub` Python 依賴，修正全新安裝後缺少 `huggingface_hub` 模組的問題。

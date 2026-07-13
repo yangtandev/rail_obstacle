@@ -217,7 +217,7 @@ def handle_alert_in_background(annotated_frame, cam_id, api_url, alert_device_ip
         except Exception as e:
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
-def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id):
+def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id, inference_fps):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
@@ -243,6 +243,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
     last_alert_time = 0
     cooldown_period = 5
+    frame_interval = 1.0 / inference_fps if inference_fps > 0 else 0
 
     no_frame_counter = 0
     no_frame_sleep = 0.2
@@ -440,6 +441,9 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                     record_frame = cv2.resize(final_display_frame, (1920, 1080))
                     video_writer.write(record_frame)
 
+                if frame_interval:
+                    time.sleep(max(0, frame_interval - (time.time() - t_start)))
+
             except Exception as e:
                 log.error(f"[{cam_id}] Unhandled exception in worker process: {e}", exc_info=True)
                 time.sleep(5)
@@ -452,6 +456,7 @@ def main():
     config = load_config()
     api_url = config['api_url']
     enable_recording = config.get('enable_recording', False)
+    inference_fps = float(config.get('inference_fps', config.get('target_fps', 8)))
     cameras = config['cameras']
 
     active_camera_ids = [cam['id'] for cam in cameras]
@@ -472,7 +477,7 @@ def main():
         process = Process(
             target=camera_process_worker,
             args=(cam['rtsp_url'], cam['id'], danger_zones[i], display_queue, stop_event, enable_recording,
-                  api_url, cam.get('alert_device_ip'), cam.get('location_id')),
+                  api_url, cam.get('alert_device_ip'), cam.get('location_id'), inference_fps),
             daemon=True
         )
         processes.append(process)

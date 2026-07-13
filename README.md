@@ -115,6 +115,3 @@ labelImg
 *   `tools/train_val_shuffle.py` — Randomly split dataset into train/validation sets.
 *   `tools/copy_yolov10_int8_dataset.py` — Copy and organize dataset into YOLOv10 format structure.
 *   `tools/crawl_pic.py` — Crawl training images from the web using Selenium.
-
-## License
-(Optional: Specify the project's license here, e.g., MIT, Apache 2.0.)

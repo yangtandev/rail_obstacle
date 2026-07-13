@@ -1,18 +1,36 @@
 {
-    "api_url": "https://jenyi-xg.api.ginibio.com/api/v1",
-    "enable_recording": false,
-    "cameras": [
-        {
-            "id": "1921683111",
-            "rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.111",
-            "alert_device_ip": "192.168.3.181",
-            "location_id": 10026
-        },
-        {
-            "id": "1921683120",
-            "rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.120",
-            "alert_device_ip": "192.168.3.182",
-            "location_id": 10045
-        }
-    ]
+	"api_url": "https://jenyi-xg.api.ginibio.com/api/v1",
+	"enable_recording": false,
+	"cameras": [
+		{
+			"id": "1921683111",
+			"rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.111",
+			"alert_device_ip": "192.168.3.181",
+			"location_id": 10026
+		},
+		{
+			"id": "1921683113",
+			"rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.113",
+			"alert_device_ip": "192.168.3.181",
+			"location_id": 10029
+		},
+		{
+			"id": "1921683115",
+			"rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.115",
+			"alert_device_ip": "192.168.3.181",
+			"location_id": 10031
+		},
+		{
+			"id": "1921683118",
+			"rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.118",
+			"alert_device_ip": "192.168.3.182",
+			"location_id": 10034
+		},
+		{
+			"id": "1921683120",
+			"rtsp_url": "rtsp://111.70.11.75:9554/live/192.168.3.120",
+			"alert_device_ip": "192.168.3.182",
+			"location_id": 10045
+		}
+	]
 }

@@ -335,7 +335,7 @@ sudo ./install.sh
 3. 透過 uv 下載 Python 3.12（無需 deadsnakes PPA 或系統 Python）
 4. 建立 `.venv` 虛擬環境並安裝所有 Python 依賴
 5. 拉取 Git LFS 模型檔案
-6. 建立 systemd 服務並自動啟動
+6. 建立 systemd user 服務並自動啟動
 
 > [!IMPORTANT]
 > 模型檔案（`.pt`, `.xml`, `.bin`）透過 **Git LFS** 管理。如果 clone 後 `models/int8/` 下的檔案大小異常小（< 1KB），表示 Git LFS 未正確拉取，需執行 `git lfs pull`。
@@ -372,7 +372,7 @@ graph LR
 
 ### 生產部署
 
-本專案使用 **systemd** 管理服務，而非 Docker。`install.sh` 會自動建立並啟動 `rail_obstacle.service`。
+本專案使用 **systemd user service** 管理服務，而非 Docker。`install.sh` 會自動建立並啟動 `rail_obstacle.service`，啟用 user lingering 支援開機自啟，後續用 `systemctl --user` 管理。
 
 **為什麼選擇 systemd 而非 Docker？**
 
@@ -388,10 +388,10 @@ graph LR
 
 ```bash
 # 常用服務管理指令
-journalctl -u rail_obstacle -f        # 查看即時日誌
-sudo systemctl status rail_obstacle    # 查看服務狀態
-sudo systemctl restart rail_obstacle   # 重啟服務
-sudo systemctl stop rail_obstacle      # 停止服務
+journalctl --user -u rail_obstacle -f        # 查看即時日誌
+systemctl --user status rail_obstacle         # 查看服務狀態
+systemctl --user restart rail_obstacle        # 重啟服務
+systemctl --user stop rail_obstacle           # 停止服務
 ```
 
 ---

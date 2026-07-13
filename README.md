@@ -53,7 +53,7 @@ The entire setup process is automated via `install.sh`, which handles:
 - Python virtual environment (via `uv`)
 - Git LFS model retrieval
 - `config.json` configuration
-- systemd service registration and startup
+- systemd user service registration and startup
 
 ```bash
 git clone https://github.com/yangtandev/rail_obstacle.git
@@ -62,6 +62,8 @@ sudo bash install.sh
 ```
 
 The service will be running as `rail_obstacle.service` upon completion.
+It is managed by the installing user via `systemctl --user`.
+The installer enables user lingering so the service can start at boot.
 
 ## Configuration
 
@@ -77,7 +79,7 @@ The following items require manual adjustment before or after running `install.s
 
 After changing configuration, restart the service:
 ```bash
-sudo systemctl restart rail_obstacle.service
+systemctl --user restart rail_obstacle.service
 ```
 
 ## Running Manually

@@ -24,6 +24,15 @@ NC='\033[0m'
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+user_systemctl() {
+    local uid
+    uid="$(id -u "${ACTUAL_USER}")"
+    sudo -u "${ACTUAL_USER}" env \
+        XDG_RUNTIME_DIR="/run/user/${uid}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+        systemctl --user "$@"
+}
+
 log_step()    { echo -e "\n${CYAN}${BOLD}[$1/7]${NC} ${BOLD}$2${NC}"; }
 log_info()    { echo -e "  ${BLUE}→${NC} $1"; }
 log_success() { echo -e "  ${GREEN}✓${NC} $1"; }
@@ -296,29 +305,30 @@ pull_lfs_models() {
 }
 
 # ──────────────────────────────────────────────────────────────
-# Step 7: Systemd service
+# Step 7: User systemd service
 # ──────────────────────────────────────────────────────────────
 setup_and_start_service() {
-    log_step 7 "部署 systemd 服務並啟動..."
+    log_step 7 "部署 systemd user 服務並啟動..."
 
     local python_bin="${PROJECT_DIR}/${VENV_DIR}/bin/python"
-    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    local user_uid
+    user_uid="$(id -u "${ACTUAL_USER}")"
+    local service_dir="${ACTUAL_HOME}/.config/systemd/user"
+    local service_file="${service_dir}/${SERVICE_NAME}.service"
 
     # Ensure runtime output directories exist
     for dir in saved_images records exhibition_shots; do
         sudo -u "${ACTUAL_USER}" mkdir -p "${PROJECT_DIR}/${dir}"
     done
 
+    sudo -u "${ACTUAL_USER}" mkdir -p "${service_dir}"
+
     cat > "${service_file}" <<EOF
 [Unit]
 Description=Rail Obstacle Detection Service
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
-User=${ACTUAL_USER}
-Group=$(id -gn "${ACTUAL_USER}")
 WorkingDirectory=${PROJECT_DIR}
 ExecStart=${python_bin} ${PROJECT_DIR}/main.py
 Restart=always
@@ -338,21 +348,32 @@ Environment=OPENCV_FFMPEG_LOGLEVEL=-8
 # Environment=XAUTHORITY=${ACTUAL_HOME}/.Xauthority
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable "${SERVICE_NAME}.service" > /dev/null 2>&1
-    log_success "服務已建立並設為開機自啟"
+    chown "${ACTUAL_USER}:$(id -gn "${ACTUAL_USER}")" "${service_file}"
+    chmod 644 "${service_file}"
+
+    if systemctl list-unit-files --type=service "${SERVICE_NAME}.service" 2>/dev/null | grep -q "^${SERVICE_NAME}\.service"; then
+        systemctl disable --now "${SERVICE_NAME}.service" > /dev/null 2>&1 || true
+        log_info "已停用舊的 system service，避免重複啟動"
+    fi
+
+    loginctl enable-linger "${ACTUAL_USER}" > /dev/null 2>&1
+    systemctl start "user@${user_uid}.service" > /dev/null 2>&1 || true
+
+    user_systemctl daemon-reload
+    user_systemctl enable "${SERVICE_NAME}.service" > /dev/null 2>&1
+    log_success "user 服務已建立並設為開機自啟"
 
     log_info "啟動服務..."
-    systemctl start "${SERVICE_NAME}.service"
+    user_systemctl start "${SERVICE_NAME}.service"
 
     sleep 3
-    if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    if user_systemctl is-active --quiet "${SERVICE_NAME}.service"; then
         log_success "服務運行中！"
     else
-        log_warn "服務可能啟動失敗，請檢查日誌: journalctl -u ${SERVICE_NAME} -n 50"
+        log_warn "服務可能啟動失敗，請檢查日誌: journalctl --user -u ${SERVICE_NAME} -n 50"
     fi
 }
 
@@ -366,14 +387,14 @@ print_summary() {
     echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "  ${BOLD}常用指令:${NC}"
-    echo -e "    查看即時日誌    ${CYAN}journalctl -u ${SERVICE_NAME} -f${NC}"
-    echo -e "    查看服務狀態    ${CYAN}sudo systemctl status ${SERVICE_NAME}${NC}"
-    echo -e "    重啟服務        ${CYAN}sudo systemctl restart ${SERVICE_NAME}${NC}"
-    echo -e "    停止服務        ${CYAN}sudo systemctl stop ${SERVICE_NAME}${NC}"
+    echo -e "    查看即時日誌    ${CYAN}journalctl --user -u ${SERVICE_NAME} -f${NC}"
+    echo -e "    查看服務狀態    ${CYAN}systemctl --user status ${SERVICE_NAME}${NC}"
+    echo -e "    重啟服務        ${CYAN}systemctl --user restart ${SERVICE_NAME}${NC}"
+    echo -e "    停止服務        ${CYAN}systemctl --user stop ${SERVICE_NAME}${NC}"
     echo ""
     echo -e "  ${BOLD}注意事項:${NC}"
-    echo -e "    • 若需要 cv2.imshow 顯示視窗，請編輯 ${CYAN}/etc/systemd/system/${SERVICE_NAME}.service${NC}"
-    echo -e "      取消 DISPLAY 與 XAUTHORITY 的註解，然後執行 ${CYAN}sudo systemctl daemon-reload && sudo systemctl restart ${SERVICE_NAME}${NC}"
+    echo -e "    • 若需要 cv2.imshow 顯示視窗，請編輯 ${CYAN}${ACTUAL_HOME}/.config/systemd/user/${SERVICE_NAME}.service${NC}"
+    echo -e "      取消 DISPLAY 與 XAUTHORITY 的註解，然後執行 ${CYAN}systemctl --user daemon-reload && systemctl --user restart ${SERVICE_NAME}${NC}"
     echo -e "    • 攝影機配置可直接編輯 ${CYAN}config.json${NC}，修改後重啟服務即可生效"
     echo ""
 }

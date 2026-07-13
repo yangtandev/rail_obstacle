@@ -11,10 +11,17 @@ from multiprocessing import Queue, Process, Event
 import requests
 from zoneinfo import ZoneInfo
 from shapely.geometry import Polygon, box
+from shapely.errors import GEOSException
+from shapely.ops import unary_union
+try:
+    from shapely.validation import make_valid
+except ImportError:
+    make_valid = None
 import datetime
 import base64
 import threading
 import json
+import signal
 from camera import Camera
 
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
@@ -69,30 +76,49 @@ def read_areas(area_files):
         with open(file_path, 'r') as file:
             for line in file.readlines():
                 x, y = map(int, line.strip().split(','))
-                points.append((x, y))
-        polygons.append(Polygon(points))
+                point = (x, y)
+                if not points or points[-1] != point:
+                    points.append(point)
+
+        polygon = Polygon(points)
+        if not polygon.is_valid:
+            fixed = make_valid(polygon) if make_valid else polygon.buffer(0)
+            if fixed.geom_type == 'GeometryCollection':
+                polygons_only = [geom for geom in fixed.geoms if geom.geom_type in ('Polygon', 'MultiPolygon')]
+                fixed = unary_union(polygons_only) if polygons_only else fixed
+            if not fixed.is_empty and fixed.is_valid and fixed.geom_type in ('Polygon', 'MultiPolygon'):
+                polygon = fixed
+                log.warning(f"{file_path} polygon invalid; repaired for runtime use.")
+            else:
+                log.error(f"{file_path} polygon invalid and cannot be repaired.")
+        polygons.append(polygon)
     return polygons
 
 def check_bboxes_in_danger_zone(danger_area_polygon, bboxes, iou_threshold=0.2):
     for bbox in bboxes:
         bbox_poly = box(*bbox)
-        if danger_area_polygon.intersects(bbox_poly):
+        try:
+            if not danger_area_polygon.intersects(bbox_poly):
+                continue
             intersection = danger_area_polygon.intersection(bbox_poly)
-            intersection_area = intersection.area
-            bbox_area = bbox_poly.area
-            if bbox_area > 0:
-                ratio = intersection_area / bbox_area
-                if ratio > iou_threshold:
-                    x1, y1, x2, y2 = bbox
-                    bbox_height = y2 - y1
-                    try:
-                        inter_minx, inter_miny, inter_maxx, inter_maxy = intersection.bounds
-                        # 只要腳底部距離交集區端點大於身高 10% (代表物件在紅色區域外下方的面積達整體的 10% 以上)，就濾除
-                        if inter_maxy < y2 - (bbox_height * 0.1):
-                            continue
-                    except Exception as e:
-                        pass
-                    return True
+        except GEOSException as e:
+            log.warning(f"Invalid danger zone geometry skipped for bbox: {e}")
+            continue
+        intersection_area = intersection.area
+        bbox_area = bbox_poly.area
+        if bbox_area > 0:
+            ratio = intersection_area / bbox_area
+            if ratio > iou_threshold:
+                x1, y1, x2, y2 = bbox
+                bbox_height = y2 - y1
+                try:
+                    inter_minx, inter_miny, inter_maxx, inter_maxy = intersection.bounds
+                    # 只要腳底部距離交集區端點大於身高 10% (代表物件在紅色區域外下方的面積達整體的 10% 以上)，就濾除
+                    if inter_maxy < y2 - (bbox_height * 0.1):
+                        continue
+                except Exception as e:
+                    pass
+                return True
     return False
 
 def calculate_overlap_ratio(bbox1, bbox2):
@@ -113,11 +139,19 @@ def calculate_overlap_ratio(bbox1, bbox2):
 def draw_transparent_polygon(image, points, color=(0, 0, 255), opacity=0.3):
     overlay = image.copy()
     output = image.copy()
-    if not points:
+    if points is None:
         return image
+    if hasattr(points, 'geoms'):
+        for geom in points.geoms:
+            if geom.geom_type == 'Polygon':
+                cv2.fillPoly(overlay, [np.array(geom.exterior.coords, dtype=np.int32)], color)
+        cv2.addWeighted(overlay, opacity, output, 1 - opacity, 0, output)
+        return output
+    if hasattr(points, 'exterior'):
+        points = points.exterior
     if hasattr(points, 'coords'):
         points = list(points.coords)
-    if points:
+    if len(points) > 0:
         cv2.fillPoly(overlay, [np.array(points, dtype=np.int32)], color)
         cv2.addWeighted(overlay, opacity, output, 1 - opacity, 0, output)
     return output
@@ -184,8 +218,23 @@ def handle_alert_in_background(annotated_frame, cam_id, api_url, alert_device_ip
             log.error(f"[{cam_id}] Error processing saved image for API: {e}")
 
 def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_event, enable_recording, api_url, alert_device_ip, location_id):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     log.info(f"[{cam_id}] Process started. 準備連線 RTSP...")
-    cam = Camera(rtsp_link)
+    transports = ('tcp', 'udp')
+    transport_index = 0
+    cam = Camera(rtsp_link, transports[transport_index])
+
+    preview_deadline = time.time() + 5
+    while not stop_event.is_set() and time.time() < preview_deadline:
+        frame = cam.get_data()
+        if frame is not None:
+            preview_frame = cv2.resize(frame, (1280, 720))
+            preview_frame = draw_transparent_polygon(preview_frame, danger_zone)
+            if not display_queue.full():
+                display_queue.put((cam_id, preview_frame))
+            break
+        time.sleep(0.1)
 
     log.info(f"[{cam_id}] RTSP 連線完成. 準備載入模型...")
     model = YOLOv10(int8_model_det_path, task='detect')
@@ -196,7 +245,10 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
     cooldown_period = 5
 
     no_frame_counter = 0
-    reconnect_threshold = 10
+    no_frame_sleep = 0.2
+    reconnect_after_seconds = 60
+    first_no_frame_time = None
+    last_no_frame_log = 0
 
     # 錄影相關變數
     video_writer = None
@@ -232,20 +284,45 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                 frame = cam.get_data()
 
                 if frame is None:
-                    no_frame_counter += 1
-                    log.warning(f"[{cam_id}] 警告: 無法取得影像 ({no_frame_counter}/{reconnect_threshold})...")
-
-                    if no_frame_counter >= reconnect_threshold:
-                        log.error(f"[{cam_id}] 影像中斷過久，釋放資源並嘗試重新連線...")
+                    if not cam.is_opened():
+                        transport_index = (transport_index + 1) % len(transports)
+                        log.warning(f"[{cam_id}] RTSP 尚未開啟，5 秒後改用 {transports[transport_index]} 重連")
                         cam.release()
-                        time.sleep(2)
-                        cam = Camera(rtsp_link)
+                        time.sleep(5)
+                        cam = Camera(rtsp_link, transports[transport_index])
                         no_frame_counter = 0
+                        first_no_frame_time = None
+                        last_no_frame_log = 0
+                        continue
 
-                    time.sleep(1)
+                    no_frame_counter += 1
+                    now_ts = time.time()
+                    if first_no_frame_time is None:
+                        first_no_frame_time = now_ts
+                    elapsed_no_frame = now_ts - first_no_frame_time
+                    remaining = max(0, int(reconnect_after_seconds - elapsed_no_frame))
+                    if no_frame_counter == 1 or now_ts - last_no_frame_log >= 15:
+                        log.warning(f"[{cam_id}] 等待 RTSP 影像中，{remaining} 秒後仍無影像才重連")
+                        last_no_frame_log = now_ts
+
+                    if elapsed_no_frame >= reconnect_after_seconds:
+                        transport_index = (transport_index + 1) % len(transports)
+                        log.error(f"[{cam_id}] 超過 {reconnect_after_seconds} 秒無影像，改用 {transports[transport_index]} 重連...")
+                        cam.release()
+                        time.sleep(0.5)
+                        cam = Camera(rtsp_link, transports[transport_index])
+                        no_frame_counter = 0
+                        first_no_frame_time = None
+                        last_no_frame_log = 0
+
+                    time.sleep(no_frame_sleep)
                     continue
 
+                if no_frame_counter:
+                    log.info(f"[{cam_id}] RTSP 影像已恢復 ({transports[transport_index]})")
                 no_frame_counter = 0
+                first_no_frame_time = None
+                last_no_frame_log = 0
 
                 frame = cv2.resize(frame, (1280, 720))
 
@@ -312,7 +389,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
                     last_alert_time = current_time
                     annotated_frame_for_alert = results.plot()
 
-                    annotated_frame_for_alert = draw_transparent_polygon(annotated_frame_for_alert, danger_zone.exterior)
+                    annotated_frame_for_alert = draw_transparent_polygon(annotated_frame_for_alert, danger_zone)
 
                     try:
                         debug_info = {
@@ -336,7 +413,7 @@ def camera_process_worker(rtsp_link, cam_id, danger_zone, display_queue, stop_ev
 
                 # --- 修改後的 Display Logic：永遠顯示 YOLO 的辨識框 ---
                 display_frame = results.plot()
-                final_display_frame = draw_transparent_polygon(display_frame, danger_zone.exterior)
+                final_display_frame = draw_transparent_polygon(display_frame, danger_zone)
 
                 if not display_queue.full():
                     display_queue.put((cam_id, final_display_frame))
@@ -405,6 +482,10 @@ def main():
     log.info("All camera processes started. Starting display loop.")
 
     latest_frames = {}
+    for cam_id in active_camera_ids:
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.putText(frame, f"Waiting for {cam_id}", (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (200, 200, 200), 2)
+        latest_frames[cam_id] = frame
     window_names = {cam_id: f'Camera {cam_id}' for cam_id in active_camera_ids}
 
     try:
@@ -445,11 +526,18 @@ def main():
 
     finally:
         log.info("Cleaning up processes...")
+        deadline = time.time() + 5
         for process in processes:
-            process.join(timeout=5)
+            process.join(timeout=max(0, deadline - time.time()))
+
+        for process in processes:
             if process.is_alive():
                 log.warning(f"Process {process.pid} did not terminate gracefully. Terminating.")
                 process.terminate()
+
+        for process in processes:
+            if process.is_alive():
+                process.join(timeout=2)
 
         cv2.destroyAllWindows()
         log.info("Shutdown complete.")

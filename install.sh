@@ -207,6 +207,7 @@ install_system_deps() {
     apt-get install -y -qq \
         git \
         git-lfs \
+        ffmpeg \
         curl \
         build-essential \
         libgl1-mesa-glx \

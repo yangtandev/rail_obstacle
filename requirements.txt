@@ -1,5 +1,6 @@
 numpy
 opencv-python
+Pillow
 openvino
 openvino-dev
 ultralytics==8.1.34
